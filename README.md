@@ -64,11 +64,53 @@ Demo implementations are available in the [`examples/`](./examples/) directory f
 - [x] **KV-backed sessions** — BA secondaryStorage pattern, unchanged from upstream.
 - [ ] Cloudflare Email
 - [ ] Cloudflare Images
-- [ ] **KV read-cache layer for IdentityDO** — globally-cached email→principalId lookups (eliminates cross-region signin RPC). DO stays as the write oracle.
+- [ ] **KV write-through cache in front of IdentityDO** _(next variant in bench picker — `kv-cache`)_ — adapter writes `kv.put('identity:'+emailHash, {principalId, version})` in the same `waitUntil` as every IdentityDO commit/disable. Sign-in's `email→principal_id` lookup reads KV first (5-30ms globally) and falls back to IdentityDO on miss. **Freshness model:** IdentityDO stays the consistency floor for the `reserve()` uniqueness check; writes are write-through with monotonic `version` so the rare KV propagation race is detectable. **Expected:** signin email lookup 600-700ms → 20-50ms. Doesn't help signup (which goes to DO regardless), but signup is the rare op for our workload.
+- [ ] **Replace IdentityDO with D1 UNIQUE index** _(next variant in bench picker — `d1-unique`)_ — current per-email-hash DO eats ~1.2-4s cold-start on every new signup (validated in `/bench cold-burst-signup`: 2240-2735 ms across 4 fresh signups, ~zero colo amortization). A D1 table with `UNIQUE (email_hash)` gives identical uniqueness guarantees with ~30-80ms reads. **Expected:** signup p50 ~3.5s → ~1.0-1.5s. Pairs naturally with the KV cache above (D1 is consistency floor, KV is hot read cache). Make IdentityDO opt-in for users who prefer the no-DB-on-hot-path purity.
+- [ ] **D1 Sessions API for read replicas** — wire `db.withSession()` to use D1's global read replicas, so sign-in / `findUserByEmail` lookups served from the user's nearest replica (~30-80ms) instead of the single primary region (100-300ms cross-region). Writes still go to the primary; eventual consistency is bounded and survivable for auth metadata.
+- [ ] **Multi-region D1 deployments** — operate one D1 _primary_ per macro-region (NA / EU / APAC), each holding its own residency-isolated principals. Routing layer (a Workers-level matcher) picks the right D1 based on `cf.continent` and the principal's home region. Strict residency without giving up the ability to read locally.
 - [ ] **Multi-database routing for residency** — pluggable per-region database bindings (EU / US / APAC), so EU auth data stays in EU D1 (or Postgres via Hyperdrive). Hard-stop residency boundary.
 - [ ] **Multi-database sharding within a region** — hash principal_id mod N across DB shards inside a jurisdiction. Supports growth beyond a single DB.
 - [ ] **Active DO dashboard** — read-only admin view of active principal DOs with location, region, and storage size
-- [ ] **Benchmark suite** — hot-path latency comparison across D1 / Hyperdrive / DO adapters, with geo-distributed test runners
+- [ ] **Hash-sharded UserDOs** — opt-in mode where principal_id → `userDo.idFromName("shard:" + hash(id) % N)` so cold starts amortize across many users. Trade-off: lose 1:1 principal:DO isolation; cap of ~256MB SQLite per shard.
+
+**Performance / observability:**
+
+> **Workload assumption.** Optimise for the typical pattern: a user signs up _once_, then returns days/weeks later — possibly from a different region. That puts **sign-in, `get-session`, and session-validation reads** on the hot path, not signup. Signup latency matters but a 1-3s signup is acceptable when sign-in and reads are sub-100ms globally. The roadmap below is ordered for that profile.
+>
+> **Bench-validated baseline** (measured in `examples/opennextjs-do/bench`, SJC colo, against the deployed Worker as of PR #5):
+>
+> - `warm-burst-signin` × 8 → 662-748 ms (p50 668, p95 721). Steady-state is dominated by scrypt CPU + 1 warm DO RPC.
+> - `cold-burst-signup` × 4 → 2240-2735 ms (p50 2251, p95 2618). DO instances do **not** meaningfully warm up across fresh cold starts in the same colo.
+> - `anon-burst` × 5 → 1267-2253 ms. Anon signin has no IdentityDO involvement so it's mostly UserDO cold-start cost.
+>
+> The two highest-ROI next changes (per the bench): **KV cache in front of IdentityDO** (sign-in hot path) and **D1 UNIQUE replacement for IdentityDO** (signup tail). Both are scaffolded as variants in the bench picker.
+
+- [x] **Structured per-method timing** _(ShipCru fork)_ — every DO RPC and adapter method emits `{op, durationMs, status}` via `timed(logger, op, fn)`. Visible in `wrangler tail --format=json` and Cloudflare Workers Logs.
+- [x] **Per-request log middleware** _(ShipCru fork)_ — one info line per Hono request with `{requestId, op, durationMs, status, colo, country}`. Indexable for p50/p95/p99 dashboards.
+- [x] **D1 query timing** _(ShipCru fork)_ — `d1AuthDataStore` wraps every prepare/run/all/first in `timed()`.
+- [x] **In-process freshness cache for create→findOne** _(ShipCru fork)_ — eliminates BA's post-create refetch DO RPC. Per-isolate map, 5s TTL, one-shot consume.
+- [x] **Skip IdentityDO pre-existence check on signup** _(ShipCru fork)_ — `findOne(user, email)` without `join.account` short-circuits; `reserve()` in create remains the authoritative uniqueness gate. Drops signup p95 from ~6s to ~3.5s.
+- [ ] **Extensive global benchmarking suite** — k6 / autocannon scenarios for anon-signin, email-signup, email-signin, get-session. Runners pinned to multiple Cloudflare colos (SJC, LHR, FRA, NRT, SYD) so we measure real geo latency, not local. Output: per-op p50/p95/p99 across regions, weekly-tracked.
+- [ ] **Global performance monitoring dashboard** — Cloudflare Analytics Engine + Grafana. Per-op SLO panels, error-budget burn rate, DO cold-start frequency, KV/D1 read tail latency by colo. Alerts wired to Cloudflare Notifications when p95 exceeds budget.
+- [ ] **Per-endpoint perf budgets** — declared in code (e.g., `sign-up/email: p95 < 1500ms`), enforced by the benchmark suite in CI. PRs blocked when a perf regression is detected.
+- [ ] **Configurable password-hash cost** — BA defaults to scrypt(N=16384, r=16, p=1), which costs ~1.5-3.5s of CPU on a Worker isolate. Expose `emailAndPassword.password.hash` overrides in the demo with documented presets (`secure` = BA default, `balanced` = N=4096, `fast` = bcrypt cost 10). Currently the single largest sub-second contributor on the warm signup path.
+- [ ] **Smart placement / `locationHint` on DO creation** — when `cf.continent` is available, pass `locationHint: "wnam" | "enam" | "weur" | …` to `idFromName()` so the DO is placed near the user on first write. Should reduce cold-start RTT for non-NA traffic.
+
+**KV performance optimizations** _(hot path = sign-in + get-session)_:
+
+- [ ] **KV write-through cache for sessions** — BA already uses KV via secondaryStorage. Audit the read path so a warm session lookup is one KV GET (no DO RPC). Profile `get-session` end-to-end to find any code that double-reads.
+- [ ] **In-isolate L1 cache in front of KV** — short-TTL (~30s) Map cache per Worker isolate for session blobs. Same-isolate repeat reads (very common during a multi-request page load) skip KV entirely. Watch out for session invalidation propagation — clear local entry on sign-out.
+- [ ] **KV cache for email → principal_id index** — write-through on signup, read-first on sign-in. KV is globally replicated (~5-30ms anywhere), so this turns the cross-region IdentityDO/D1 read into a fast local read for the 99% case. D1 UNIQUE stays as the consistency floor for the eventual-consistency window.
+- [ ] **KV cache for `findUserById`** — same pattern for the `findOne(user, id)` path BA uses inside session validation. Invalidate on `updatePrincipal`.
+- [ ] **KV cache priming on signup** — when `create(user)` lands, write KV entries for `email_hash` and `principal_id` in the same `waitUntil` that drains the outbox. First post-signup sign-in is then already-cached.
+- [ ] **Bulk KV reads in session validation** — combine session + user + account lookups into a single `Promise.all` with all three KV GETs in parallel.
+- [ ] **Document KV consistency model + TTL choices** — README section explaining when stale reads are acceptable (sessions, profile data) vs when they are not (email uniqueness — backed by D1 UNIQUE; password verification — bypasses cache).
+
+**Collaborative editing primitives (Glass / ShipCru-specific):**
+
+- [ ] **ResumeDurableObject** with WebSocket Hibernation API (`ctx.acceptWebSocket`). One DO per resume, holds canonical document, broadcasts edits to all connected sessions, hibernates when idle. Auth-gated via session cookie verification before `acceptWebSocket`. Op-log + periodic snapshot; CRDT-friendly (LWW or Yjs-compatible binary deltas).
+- [ ] **Presence / cursor sync** — extension of ResumeDO; broadcasts ephemeral cursor positions and user color via separate WS message kind, never written to storage.
+- [ ] **Multi-doc bulk-edit DO** — when one principal opens N resumes at once (typical for batch operations), share a single DO connection instead of N WebSockets.
 
 **CLI:**
 

@@ -87,7 +87,12 @@ function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, 
         // Trust the local Hono port and the Next.js frontend that proxies
         // to it. Production should set these to your actual deployed
         // origins. Wildcards are not supported here — list explicitly.
-        trustedOrigins: ["http://localhost:8787", "http://localhost:3000"],
+        trustedOrigins: [
+            "http://localhost:8787",
+            "http://localhost:3000",
+            "https://better-auth-cloudflare-hono-do.steve-4b7.workers.dev",
+            "https://better-auth-cloudflare-opennextjs-do.steve-4b7.workers.dev",
+        ],
         ...wrapped,
         session: {
             ...wrapped.session,

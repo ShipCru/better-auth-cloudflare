@@ -9,13 +9,16 @@ assets = { directory = ".open-next/assets", binding = "ASSETS" }
 enabled = true
 
 # This Next.js app is the AUTH FRONTEND. It does not own DOs or KV or D1.
-# All auth-related requests are proxied to the Hono auth Worker (see
-# next.config.ts's `rewrites`), which is where the DOs live. This keeps
-# the OpenNext app a pure UI and avoids the OpenNext + DO local-dev
-# friction (OpenNext's generated Worker doesn't easily re-export DO
-# classes that Miniflare requires for local dev).
+# All auth-related requests are proxied to the Hono auth Worker, where
+# the DOs live, via the AUTH_BACKEND service binding below (see
+# src/middleware.ts). This avoids Cloudflare's same-account
+# *.workers.dev outbound-fetch quirk that makes plain HTTP rewrites
+# between Workers return the generic 404 placeholder.
 #
-# In production, deploy this Worker and the Hono Worker side by side, then
-# either:
-#   - Same origin via Cloudflare routing (preferred — cookies work natively)
-#   - Different origins + CORS + cookie-domain shared (more setup)
+# Local dev must also go through wrangler (`pnpm preview`) so the binding
+# is wired — plain `next dev` returns 503 from middleware because the
+# binding isn't present.
+
+[[services]]
+binding = "AUTH_BACKEND"
+service = "better-auth-cloudflare-hono-do"

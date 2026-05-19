@@ -1,14 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { signIn, signUp, useSession } from "@/lib/auth-client";
+import { useTiming } from "@/lib/timing";
 
 type Mode = "signin" | "signup" | "anonymous";
 
 export default function HomePage() {
     const { data: session, isPending } = useSession();
     const router = useRouter();
+    const { timed } = useTiming();
     const [mode, setMode] = useState<Mode>("signin");
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
@@ -16,12 +18,24 @@ export default function HomePage() {
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
 
-    if (isPending) {
+    const userId = session?.user?.id ?? null;
+
+    // Prefetch /dashboard as soon as the page mounts so the post-login
+    // transition resolves from the browser cache. Cheap — Next.js dedupes
+    // and caches the RSC payload.
+    useEffect(() => {
+        router.prefetch("/dashboard");
+    }, [router]);
+
+    // Programmatic redirect runs in an effect, not during render. Calling
+    // router.push() during render triggers a setState-in-render warning and
+    // causes an extra render cycle.
+    useEffect(() => {
+        if (!isPending && userId) router.replace("/dashboard");
+    }, [isPending, userId, router]);
+
+    if (isPending || userId) {
         return <div className="text-sm text-gray-500">Loading…</div>;
-    }
-    if (session) {
-        router.push("/dashboard");
-        return null;
     }
 
     async function handleSubmit(ev: React.FormEvent) {
@@ -30,10 +44,12 @@ export default function HomePage() {
         setLoading(true);
         try {
             if (mode === "signup") {
-                const r = await signUp.email({ email, password, name: name || email.split("@")[0] });
+                const r = await timed("sign-up.email", () =>
+                    signUp.email({ email, password, name: name || email.split("@")[0] })
+                );
                 if (r.error) throw new Error(r.error.message);
             } else if (mode === "signin") {
-                const r = await signIn.email({ email, password });
+                const r = await timed("sign-in.email", () => signIn.email({ email, password }));
                 if (r.error) throw new Error(r.error.message);
             }
             router.push("/dashboard");
@@ -47,7 +63,7 @@ export default function HomePage() {
     async function handleAnonymous() {
         setLoading(true);
         try {
-            await signIn.anonymous();
+            await timed("sign-in.anonymous", () => signIn.anonymous());
             router.push("/dashboard");
         } catch (err) {
             setError((err as Error).message);
@@ -59,7 +75,9 @@ export default function HomePage() {
     async function handleGoogle() {
         setLoading(true);
         try {
-            await signIn.social({ provider: "google", callbackURL: "/dashboard" });
+            await timed("sign-in.social.google", () =>
+                signIn.social({ provider: "google", callbackURL: "/dashboard" })
+            );
         } catch (err) {
             setError((err as Error).message);
             setLoading(false);
@@ -71,14 +89,14 @@ export default function HomePage() {
             <div>
                 <h1 className="text-3xl font-bold tracking-tight">better-auth-cloudflare</h1>
                 <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">
-                    React + Next.js (OpenNext) demo with Durable Object-backed auth.
-                    Storage: per-principal DOs. No DB on the hot path.
+                    React + Next.js (OpenNext) demo with Durable Object-backed auth. Storage: per-principal DOs. No DB
+                    on the hot path.
                 </p>
             </div>
 
             <div className="rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-6 shadow-sm">
                 <div className="mb-4 flex gap-2 border-b border-gray-200 dark:border-gray-800">
-                    {(["signin", "signup"] as const).map((m) => (
+                    {(["signin", "signup"] as const).map(m => (
                         <button
                             key={m}
                             onClick={() => setMode(m)}
@@ -100,7 +118,7 @@ export default function HomePage() {
                             <input
                                 type="text"
                                 value={name}
-                                onChange={(e) => setName(e.target.value)}
+                                onChange={e => setName(e.target.value)}
                                 className="w-full rounded-md border border-gray-300 dark:border-gray-700 dark:bg-gray-800 px-3 py-2 text-sm"
                             />
                         </div>
@@ -111,7 +129,7 @@ export default function HomePage() {
                             type="email"
                             required
                             value={email}
-                            onChange={(e) => setEmail(e.target.value)}
+                            onChange={e => setEmail(e.target.value)}
                             className="w-full rounded-md border border-gray-300 dark:border-gray-700 dark:bg-gray-800 px-3 py-2 text-sm"
                         />
                     </div>
@@ -122,7 +140,7 @@ export default function HomePage() {
                             required
                             minLength={8}
                             value={password}
-                            onChange={(e) => setPassword(e.target.value)}
+                            onChange={e => setPassword(e.target.value)}
                             className="w-full rounded-md border border-gray-300 dark:border-gray-700 dark:bg-gray-800 px-3 py-2 text-sm"
                         />
                     </div>

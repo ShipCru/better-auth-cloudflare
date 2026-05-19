@@ -21,4 +21,10 @@ export interface CloudflareBindings {
     USE_PBKDF2?: string;
     /** "1" enables KV cache for email→principal_id lookups. See auth/identity-cache.ts. */
     USE_KV_CACHE?: string;
+    /**
+     * Active pepper secret (hex or base64). When set, all custom hash
+     * variants HMAC the password with this secret before hashing. See
+     * auth/pepper.ts. Set via `wrangler secret put BETTER_AUTH_PEPPER`.
+     */
+    BETTER_AUTH_PEPPER?: string;
 }

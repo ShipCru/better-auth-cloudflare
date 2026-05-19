@@ -290,11 +290,20 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
 
     async listAccounts(userId: string): Promise<AccountRecord[]> {
         return timed(this.log, "listAccounts", async () => {
+            // Sub-method timing: we want to know if the 200-300ms wallTime
+            // the CF DO trace reports is SQL time, JS mapping time, or RPC
+            // serialization. For a 1-row result, SQL should be sub-ms.
+            const sqlStart = Date.now();
             const rows = runSql(
                 this.ctx.storage.sql,
                 `SELECT * FROM accounts ORDER BY created_at`
             ).toArray() as unknown as RawAccount[];
-            return rows.map(r => toAccount(r, userId));
+            const sqlMs = Date.now() - sqlStart;
+            const mapStart = Date.now();
+            const mapped = rows.map(r => toAccount(r, userId));
+            const mapMs = Date.now() - mapStart;
+            this.log.info("listAccounts.detail", { rowCount: rows.length, sqlMs, mapMs });
+            return mapped;
         });
     }
 

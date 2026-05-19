@@ -1,8 +1,8 @@
-import type { IncomingRequestCfProperties } from '@cloudflare/workers-types';
-import { betterAuth } from 'better-auth';
-import { withCloudflare } from 'better-auth-cloudflare';
-import { anonymous } from 'better-auth/plugins';
-import type { CloudflareBindings } from '../env';
+import type { IncomingRequestCfProperties } from "@cloudflare/workers-types";
+import { betterAuth } from "better-auth";
+import { withCloudflare } from "better-auth-cloudflare";
+import { anonymous } from "better-auth/plugins";
+import type { CloudflareBindings } from "../env";
 
 /**
  * Single auth factory wired to the Durable Object adapter.
@@ -14,47 +14,54 @@ import type { CloudflareBindings } from '../env';
  * No D1/Hyperdrive needed. Hot path is signature verify + zero-to-two DO
  * RPCs depending on the flow.
  */
-function createAuth(
-  env?: CloudflareBindings,
-  cf?: IncomingRequestCfProperties,
-  baseURL?: string,
-) {
-  return betterAuth({
-    baseURL,
-    ...withCloudflare(
-      {
-        autoDetectIpAddress: true,
-        geolocationTracking: true,
-        cf: cf ?? {},
-        do: env
-          ? {
-              userDo: env.USER_DO,
-              identityDo: env.IDENTITY_DO,
-              logLevel: 'info',
-            }
-          : undefined,
-        kv: env?.KV,
-      },
-      {
-        emailAndPassword: { enabled: true },
-        plugins: [anonymous()],
+function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, baseURL?: string) {
+    // Sessions in this v1 of the DO adapter go to BA's secondaryStorage (KV),
+    // not to the DO. We disable `geolocationTracking` here (which would force
+    // sessions into the DB-backed path) — the `cloudflare/geolocation`
+    // endpoint still works because the plugin is enabled and `cf` is set.
+    // Adding session persistence to the DO adapter is a planned follow-up
+    // (see the fork's roadmap).
+    const wrapped = withCloudflare(
+        {
+            autoDetectIpAddress: true,
+            geolocationTracking: false,
+            cf: cf ?? {},
+            do: env
+                ? {
+                      userDo: env.USER_DO,
+                      identityDo: env.IDENTITY_DO,
+                      logLevel: "info",
+                  }
+                : undefined,
+            kv: env?.KV,
+        },
+        {
+            emailAndPassword: { enabled: true },
+            plugins: [anonymous()],
+            rateLimit: {
+                enabled: true,
+                window: 60,
+                max: 100,
+                customRules: {
+                    "/sign-in/email": { window: 60, max: 100 },
+                    "/sign-up/email": { window: 60, max: 20 },
+                },
+            },
+        }
+    );
+
+    return betterAuth({
+        baseURL,
+        ...wrapped,
+        // Force sessions into KV via secondaryStorage instead of the adapter.
         session: {
-          expiresIn: 21 * 24 * 60 * 60,
-          updateAge: 24 * 60 * 60,
-          cookieCache: { enabled: true, maxAge: 5 * 60 },
+            ...wrapped.session,
+            storeSessionInDatabase: false,
+            expiresIn: 21 * 24 * 60 * 60,
+            updateAge: 24 * 60 * 60,
+            cookieCache: { enabled: true, maxAge: 5 * 60 },
         },
-        rateLimit: {
-          enabled: true,
-          window: 60,
-          max: 100,
-          customRules: {
-            '/sign-in/email': { window: 60, max: 100 },
-            '/sign-up/email': { window: 60, max: 20 },
-          },
-        },
-      },
-    ),
-  });
+    });
 }
 
 export const auth = createAuth();

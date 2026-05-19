@@ -20,17 +20,22 @@ export default function DashboardPage() {
     const [users, setUsers] = useState<AdminUser[]>([]);
     const [loadingUsers, setLoadingUsers] = useState(false);
 
-    useEffect(() => {
-        if (!isPending && !session) router.push("/");
-    }, [isPending, session, router]);
+    // useSession() may return a fresh object reference on every render even
+    // when nothing changed. Depend on the stable user id (or its absence) so
+    // this effect doesn't refetch /admin/users in an infinite loop.
+    const userId = session?.user?.id ?? null;
 
     useEffect(() => {
-        if (!session) return;
+        if (!isPending && !userId) router.push("/");
+    }, [isPending, userId, router]);
+
+    useEffect(() => {
+        if (!userId) return;
         setLoadingUsers(true);
         timed("GET /admin/users", () => fetch("/admin/users?limit=20").then(r => r.json()))
             .then((data: { users?: AdminUser[] }) => setUsers(data.users ?? []))
             .finally(() => setLoadingUsers(false));
-    }, [session, timed]);
+    }, [userId, timed]);
 
     if (isPending || !session) return <div className="text-sm text-gray-500">Loading…</div>;
 

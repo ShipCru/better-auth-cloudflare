@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { signIn, signUp, useSession } from "@/lib/auth-client";
 import { useTiming } from "@/lib/timing";
@@ -18,12 +18,24 @@ export default function HomePage() {
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
 
-    if (isPending) {
+    const userId = session?.user?.id ?? null;
+
+    // Prefetch /dashboard as soon as the page mounts so the post-login
+    // transition resolves from the browser cache. Cheap — Next.js dedupes
+    // and caches the RSC payload.
+    useEffect(() => {
+        router.prefetch("/dashboard");
+    }, [router]);
+
+    // Programmatic redirect runs in an effect, not during render. Calling
+    // router.push() during render triggers a setState-in-render warning and
+    // causes an extra render cycle.
+    useEffect(() => {
+        if (!isPending && userId) router.replace("/dashboard");
+    }, [isPending, userId, router]);
+
+    if (isPending || userId) {
         return <div className="text-sm text-gray-500">Loading…</div>;
-    }
-    if (session) {
-        router.push("/dashboard");
-        return null;
     }
 
     async function handleSubmit(ev: React.FormEvent) {

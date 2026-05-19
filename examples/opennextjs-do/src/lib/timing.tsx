@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 
 /**
  * Per-operation timing UI for the demo.
@@ -32,7 +32,12 @@ export function TimingProvider({ children }: { children: ReactNode }) {
     // other's elapsed times — we only keep the *last* one in the bar.
     const lastLabel = useRef<string | null>(null);
 
-    async function timed<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    // useCallback with empty deps gives a stable identity across renders,
+    // which matters because consumers put `timed` in useEffect deps. Without
+    // this, every render creates a new function reference, the effect re-runs,
+    // setCurrent re-renders, infinite loop. setCurrent is stable from useState
+    // and lastLabel is a ref, so the callback genuinely has no deps.
+    const timed = useCallback(async function timedImpl<T>(label: string, fn: () => Promise<T>): Promise<T> {
         lastLabel.current = label;
         setCurrent({ label, state: "running" });
         const t0 = performance.now();
@@ -53,9 +58,12 @@ export function TimingProvider({ children }: { children: ReactNode }) {
             }
             throw err;
         }
-    }
+    }, []);
 
-    return <TimingContext.Provider value={{ current, timed }}>{children}</TimingContext.Provider>;
+    // Memoize the context value so a re-render of TimingProvider doesn't force
+    // every consumer of useTiming() to re-render with a new object reference.
+    const value = useMemo(() => ({ current, timed }), [current, timed]);
+    return <TimingContext.Provider value={value}>{children}</TimingContext.Provider>;
 }
 
 export function useTiming(): TimingContextValue {

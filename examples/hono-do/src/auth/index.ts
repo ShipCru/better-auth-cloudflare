@@ -84,8 +84,11 @@ function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, 
 
     return betterAuth({
         baseURL,
+        // Trust the local Hono port and the Next.js frontend that proxies
+        // to it. Production should set these to your actual deployed
+        // origins. Wildcards are not supported here — list explicitly.
+        trustedOrigins: ["http://localhost:8787", "http://localhost:3000"],
         ...wrapped,
-        // Force sessions into KV via secondaryStorage instead of the adapter.
         session: {
             ...wrapped.session,
             storeSessionInDatabase: false,

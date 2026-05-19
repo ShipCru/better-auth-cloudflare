@@ -27,4 +27,10 @@ export interface CloudflareBindings {
      * auth/pepper.ts. Set via `wrangler secret put BETTER_AUTH_PEPPER`.
      */
     BETTER_AUTH_PEPPER?: string;
+    /**
+     * "1" enables the bundle RPC for `findOne(user, email, join.account)`.
+     * Replaces the legacy findPrincipal + listAccounts pair with one
+     * scalar-returning RPC. Sidesteps the ~200-300ms CF list-RPC overhead.
+     */
+    USE_BUNDLE_RPC?: string;
 }

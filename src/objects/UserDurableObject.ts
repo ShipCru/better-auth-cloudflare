@@ -160,13 +160,56 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
         );
     }
 
-    async findPrincipal(): Promise<PrincipalRecord | null> {
-        return timed(this.log, "findPrincipal", async () => {
-            const row = runSql(this.ctx.storage.sql, `SELECT * FROM principal LIMIT 1`).toArray()[0] as unknown as
-                | RawPrincipal
-                | undefined;
-            return row ? toPrincipal(row) : null;
-        });
+    /**
+     * Look up the principal. Optional `include: ['accountsJson']` adds a
+     * JSON-stringified array of accounts to the response — a single RPC
+     * that replaces the legacy findPrincipal + listAccounts sequence.
+     *
+     * Why a JSON string instead of an array of objects: Cloudflare's DO
+     * RPC layer adds ~200-300ms of wallTime overhead to list-returning
+     * calls (measured in the listAccounts probe — internal sqlMs=0,
+     * mapMs=0, but the trace reports wallTime=263ms with cpuTime=0ms).
+     * Scalar returns (including strings) don't get the same penalty.
+     *
+     * Callers pay JSON.parse() time on the worker side — sub-millisecond
+     * for typical account counts. Net win: one round-trip saved AND avoid
+     * the list-serialization overhead.
+     *
+     * Backward compatible: no opts → returns just `PrincipalRecord | null`
+     * exactly like before.
+     */
+    async findPrincipal(): Promise<PrincipalRecord | null>;
+    async findPrincipal(opts: {
+        include: ReadonlyArray<"accountsJson">;
+        userId: string;
+    }): Promise<{ principal: PrincipalRecord; accountsJson: string } | null>;
+    async findPrincipal(opts?: {
+        include?: ReadonlyArray<"accountsJson">;
+        userId?: string;
+    }): Promise<PrincipalRecord | { principal: PrincipalRecord; accountsJson: string } | null> {
+        return timed(
+            this.log,
+            "findPrincipal",
+            async () => {
+                const principalRow = runSql(
+                    this.ctx.storage.sql,
+                    `SELECT * FROM principal LIMIT 1`
+                ).toArray()[0] as unknown as RawPrincipal | undefined;
+                if (!principalRow) return null;
+                const principal = toPrincipal(principalRow);
+                if (!opts?.include?.includes("accountsJson")) return principal;
+                const userId = opts.userId ?? principal.id;
+                const accountRows = runSql(
+                    this.ctx.storage.sql,
+                    `SELECT * FROM accounts ORDER BY created_at`
+                ).toArray() as unknown as RawAccount[];
+                return {
+                    principal,
+                    accountsJson: JSON.stringify(accountRows.map(r => toAccount(r, userId))),
+                };
+            },
+            { include: opts?.include?.join(",") ?? "" }
+        );
     }
 
     async updatePrincipal(patch: Partial<Omit<PrincipalRecord, "id" | "createdAt">>): Promise<PrincipalRecord> {

@@ -85,6 +85,13 @@ function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, 
                       // Set per-env in wrangler.toml [env.thick.vars] for a
                       // sibling deploy that can be A/B'd against current.
                       thickIdentity: env.USE_THICK_IDENTITY === "1",
+                      // Opt-in bundle RPC. USE_BUNDLE_RPC=1 collapses the
+                      // legacy findPrincipal + listAccounts two-call
+                      // sequence into one findPrincipal({include:['accountsJson']})
+                      // call. Sidesteps CF's list-RPC wallTime penalty
+                      // (~200-300ms even for 1-row results). Compatible with
+                      // thickIdentity — the thick path wins when both set.
+                      bundleUserAccounts: env.USE_BUNDLE_RPC === "1",
                   }
                 : undefined,
             kv: env?.KV,

@@ -84,6 +84,18 @@ export interface DOAdapterConfig {
      * Build with `createIdentityIndexCache({ kv, d1?, log? })`.
      */
     identityIndexCache?: IdentityIndexCache;
+    /**
+     * Opt-in: when fulfilling `findOne(user, email, join.account=true)`
+     * non-thick paths, call `UserDO.findPrincipal({ include: ['accountsJson'] })`
+     * — a single bundle RPC that returns principal + JSON-encoded accounts
+     * in one round-trip. Sidesteps the ~200-300ms CF list-serialization
+     * wallTime that plagues the legacy `findPrincipal` + `listAccounts`
+     * two-call sequence (see UserDurableObject.findPrincipal docs).
+     *
+     * Safe to enable always — the bundle RPC is backward compatible (calling
+     * findPrincipal() with no opts still returns just the principal).
+     */
+    bundleUserAccounts?: boolean;
 }
 
 export interface RegionContext {
@@ -397,6 +409,25 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                                 }
                                 if (!lookup) return null;
                                 const stub = userStub(lookup.principalId);
+
+                                // Bundle path: ONE DO RPC returns principal + accounts as a
+                                // scalar wrapper with accountsJson. Avoids both the second
+                                // round-trip AND the CF list-serialization wallTime penalty.
+                                if (config.bundleUserAccounts) {
+                                    // @ts-expect-error — DO RPC overload
+                                    const bundle = (await stub.findPrincipal({
+                                        include: ["accountsJson"],
+                                        userId: lookup.principalId,
+                                    })) as { principal: PrincipalRecord; accountsJson: string } | null;
+                                    if (!bundle) return null;
+                                    const baUser = mapPrincipalToBA(bundle.principal);
+                                    const accounts = JSON.parse(bundle.accountsJson) as AccountRecord[];
+                                    (baUser as Record<string, unknown>).account = accounts.map(mapAccountToBA);
+                                    log.info("findOne.email.bundle_hit", {});
+                                    rememberFresh("user", lookup.principalId, mapPrincipalToBA(bundle.principal));
+                                    return baUser as never;
+                                }
+
                                 // @ts-expect-error
                                 const p = (await stub.findPrincipal()) as PrincipalRecord | null;
                                 if (!p) return null;

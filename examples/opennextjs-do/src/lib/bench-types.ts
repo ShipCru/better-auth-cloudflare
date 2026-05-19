@@ -65,6 +65,13 @@ export const BACKEND_VARIANTS = [
         description:
             "Sibling deploy that combines scrypt(N=4096) AND the KV (+D1) identity index cache. Tests whether the two optimisations compound — expected ~370ms warm signin p50 (-44% vs current).",
     },
+    {
+        id: "recommended",
+        binding: "AUTH_BACKEND_RECOMMENDED",
+        label: "Recommended: pbkdf2 + pepper + kv-cache + bundle-rpc — live",
+        description:
+            "Production-grade stack. Native PBKDF2 (no JS CPU pressure under burst load) + HMAC pepper (defence vs offline DB-leak attacks) + KV identity cache (skip IdentityDO on warm signin) + bundle RPC (one DO call for user+accounts, sidesteps the ~230ms CF list-RPC overhead).",
+    },
 ] as const;
 
 export type VariantId = (typeof BACKEND_VARIANTS)[number]["id"];

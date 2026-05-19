@@ -56,3 +56,9 @@ service = "better-auth-cloudflare-hono-do-kv-cache"
 [[services]]
 binding = "AUTH_BACKEND_STACKED"
 service = "better-auth-cloudflare-hono-do-stacked"
+
+# Recommended production combo: pbkdf2 + pepper + kv-cache + bundle-rpc.
+# `wrangler deploy --env recommended`. Requires BETTER_AUTH_PEPPER secret.
+[[services]]
+binding = "AUTH_BACKEND_RECOMMENDED"
+service = "better-auth-cloudflare-hono-do-recommended"

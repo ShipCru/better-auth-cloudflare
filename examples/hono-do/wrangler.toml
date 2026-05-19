@@ -249,3 +249,49 @@ dataset = "ba_cf_do_events"
 binding = "AUTH_DB"
 database_name = "ba-cf-do-recovery"
 database_id = "00000000-0000-0000-0000-000000000000"
+
+# RECOMMENDED PRODUCTION COMBO. Native PBKDF2 (Workers C++, no JS CPU
+# pressure) + pepper (HMAC server secret before hash, defense vs DB
+# leaks) + KV identity cache (skip IdentityDO on warm signin) + bundle
+# RPC (one DO call instead of two for the user+accounts join).
+#
+#   wrangler secret put BETTER_AUTH_SECRET --env recommended
+#   wrangler secret put BETTER_AUTH_PEPPER --env recommended    # hex or base64
+#   wrangler deploy --env recommended
+#
+# Bench-validated combo deployed for live A/B as the `recommended` variant.
+[env.recommended]
+name = "better-auth-cloudflare-hono-do-recommended"
+
+[env.recommended.observability]
+enabled = true
+
+[env.recommended.vars]
+USE_PBKDF2 = "1"
+USE_KV_CACHE = "1"
+USE_BUNDLE_RPC = "1"
+
+[[env.recommended.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.recommended.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.recommended.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.recommended.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.recommended.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+[[env.recommended.d1_databases]]
+binding = "AUTH_DB"
+database_name = "ba-cf-do-recovery"
+database_id = "00000000-0000-0000-0000-000000000000"

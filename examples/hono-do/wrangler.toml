@@ -211,3 +211,41 @@ dataset = "ba_cf_do_events"
 binding = "AUTH_DB"
 database_name = "ba-cf-do-recovery"
 database_id = "00000000-0000-0000-0000-000000000000"
+
+# Sibling deploy: stacked combo of fast-hash + kv-cache. Tests whether
+# the two optimisations compound. Expected: ~370ms warm signin p50
+# (-44% vs current). `wrangler deploy --env stacked`.
+[env.stacked]
+name = "better-auth-cloudflare-hono-do-stacked"
+
+[env.stacked.observability]
+enabled = true
+
+[env.stacked.vars]
+USE_FAST_HASH = "1"
+USE_KV_CACHE = "1"
+
+[[env.stacked.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.stacked.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.stacked.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.stacked.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.stacked.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+[[env.stacked.d1_databases]]
+binding = "AUTH_DB"
+database_name = "ba-cf-do-recovery"
+database_id = "00000000-0000-0000-0000-000000000000"

@@ -49,3 +49,10 @@ service = "better-auth-cloudflare-hono-do-pbkdf2"
 [[services]]
 binding = "AUTH_BACKEND_KV_CACHE"
 service = "better-auth-cloudflare-hono-do-kv-cache"
+
+# Sibling auth Worker with USE_FAST_HASH=1 AND USE_KV_CACHE=1 stacked.
+# `wrangler deploy --env stacked`. Tests whether the two optimisations
+# compound — expected ~370ms warm signin p50 (-44% vs current).
+[[services]]
+binding = "AUTH_BACKEND_STACKED"
+service = "better-auth-cloudflare-hono-do-stacked"

@@ -72,7 +72,19 @@ export function createIdentityIndexCache(opts: { kv: KVNamespace; d1?: D1Databas
 
             if (opts.d1) {
                 try {
-                    const row = (await opts.d1
+                    // D1 Sessions API: db.withSession({constraint}) opts into
+                    // global read replicas with bookmark-based consistency.
+                    // "first-unconstrained" picks the nearest replica without
+                    // requiring sequential consistency vs a prior write — best
+                    // for identity-index reads since the data is effectively
+                    // immutable per binding.
+                    const sess =
+                        typeof (opts.d1 as { withSession?: unknown }).withSession === "function"
+                            ? (opts.d1 as { withSession: (c?: string) => D1Database }).withSession(
+                                  "first-unconstrained"
+                              )
+                            : opts.d1;
+                    const row = (await sess
                         .prepare(`SELECT principal_id, version FROM identity_index WHERE email_hash = ?`)
                         .bind(emailHash)
                         .first()) as { principal_id: string; version: number } | null;

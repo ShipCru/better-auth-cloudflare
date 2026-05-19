@@ -58,6 +58,13 @@ export const BACKEND_VARIANTS = [
         description:
             "Sibling deploy using crypto.subtle.deriveBits. Cloudflare Workers caps PBKDF2 at 100k iters (below OWASP 2023's 600k), so this is the fastest end of the perf spectrum at reduced cryptographic strength. Tests whether native crypto beats the JS scrypt variants.",
     },
+    {
+        id: "stacked",
+        binding: "AUTH_BACKEND_STACKED",
+        label: "Stacked: fast-hash + kv-cache — live",
+        description:
+            "Sibling deploy that combines scrypt(N=4096) AND the KV (+D1) identity index cache. Tests whether the two optimisations compound — expected ~370ms warm signin p50 (-44% vs current).",
+    },
 ] as const;
 
 export type VariantId = (typeof BACKEND_VARIANTS)[number]["id"];

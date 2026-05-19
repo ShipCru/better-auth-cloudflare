@@ -64,12 +64,11 @@ Demo implementations are available in the [`examples/`](./examples/) directory f
 - [x] **KV-backed sessions** — BA secondaryStorage pattern, unchanged from upstream.
 - [ ] Cloudflare Email
 - [ ] Cloudflare Images
-- [ ] **KV write-through cache in front of IdentityDO** _(next variant in bench picker — `kv-cache`)_ — adapter writes `kv.put('identity:'+emailHash, {principalId, version})` in the same `waitUntil` as every IdentityDO commit/disable. Sign-in's `email→principal_id` lookup reads KV first (5-30ms globally) and falls back to IdentityDO on miss. **Freshness model:** IdentityDO stays the consistency floor for the `reserve()` uniqueness check; writes are write-through with monotonic `version` so the rare KV propagation race is detectable. **Expected:** signin email lookup 600-700ms → 20-50ms. Doesn't help signup (which goes to DO regardless), but signup is the rare op for our workload.
-- [ ] **Replace IdentityDO with D1 UNIQUE index** _(next variant in bench picker — `d1-unique`)_ — current per-email-hash DO eats ~1.2-4s cold-start on every new signup (validated in `/bench cold-burst-signup`: 2240-2735 ms across 4 fresh signups, ~zero colo amortization). A D1 table with `UNIQUE (email_hash)` gives identical uniqueness guarantees with ~30-80ms reads. **Expected:** signup p50 ~3.5s → ~1.0-1.5s. Pairs naturally with the KV cache above (D1 is consistency floor, KV is hot read cache). Make IdentityDO opt-in for users who prefer the no-DB-on-hot-path purity.
-- [ ] **D1 Sessions API for read replicas** — wire `db.withSession()` to use D1's global read replicas, so sign-in / `findUserByEmail` lookups served from the user's nearest replica (~30-80ms) instead of the single primary region (100-300ms cross-region). Writes still go to the primary; eventual consistency is bounded and survivable for auth metadata.
-- [ ] **Multi-region D1 deployments** — operate one D1 _primary_ per macro-region (NA / EU / APAC), each holding its own residency-isolated principals. Routing layer (a Workers-level matcher) picks the right D1 based on `cf.continent` and the principal's home region. Strict residency without giving up the ability to read locally.
-- [ ] **Multi-database routing for residency** — pluggable per-region database bindings (EU / US / APAC), so EU auth data stays in EU D1 (or Postgres via Hyperdrive). Hard-stop residency boundary.
-- [ ] **Multi-database sharding within a region** — hash principal_id mod N across DB shards inside a jurisdiction. Supports growth beyond a single DB.
+- [x] **KV write-through cache in front of IdentityDO** _(ShipCru fork — `kv-cache`, `stacked`, `recommended` variants)_ — adapter writes `kv.put('identity:'+emailHash, {principalId, version})` in the same `waitUntil` as every IdentityDO commit/disable. Sign-in's `email→principal_id` lookup reads KV first (5-30ms globally) and falls back to IdentityDO on miss. **Freshness model:** IdentityDO stays the consistency floor for the `reserve()` uniqueness check; writes are write-through with monotonic `version` so the rare KV propagation race is detectable.
+- [x] **Replace IdentityDO with D1 UNIQUE index** _(ShipCru fork — `d1-unique`, `d1-unique-stateless` variants)_ — D1 table with `UNIQUE (email_hash)` gives identical uniqueness guarantees with ~30-80ms reads. **Measured:** signup p50 ~2.1s → ~0.8s in WEUR, ~3.2s → ~1.0s in APAC. See [Benchmark results](#benchmark-results-multi-region-signup-p50) below. IdentityDO remains the default; opt-in via `USE_D1_IDENTITY=1`.
+- [x] **D1 Sessions API for read replicas** _(ShipCru fork)_ — `db.withSession("first-unconstrained")` is wired on every read path through the `identity_index` cache and `d1IdentityStore.lookup`. Writes still go to the primary; eventual consistency is bounded and survivable for auth metadata.
+- [ ] **Multi-region D1 deployments + jurisdiction routing** — see [Multi-region D1 plan](#multi-region-d1--jurisdiction-routing-plan) below for the full design. **Phase 1:** single D1 primary moved to `enam` (closest to NA + EU). **Phase 2:** add a second D1 primary in `weur` for EU-resident principals, with a per-principal `home_region` claim recorded at signup and a Worker-level router that picks the right database. **Phase 3:** APAC primary if traffic justifies it.
+- [ ] **Multi-database sharding within a region** — hash principal_id mod N across DB shards inside a jurisdiction. Supports growth beyond a single DB (~10GB D1 ceiling per database). Compose with the jurisdiction layer above.
 - [ ] **Active DO dashboard** — read-only admin view of active principal DOs with location, region, and storage size
 - [ ] **Hash-sharded UserDOs** — opt-in mode where principal_id → `userDo.idFromName("shard:" + hash(id) % N)` so cold starts amortize across many users. Trade-off: lose 1:1 principal:DO isolation; cap of ~256MB SQLite per shard.
 
@@ -157,8 +156,137 @@ Demo implementations are available in the [`examples/`](./examples/) directory f
 
 - [x] Structured logging (`createLogger`)
 - [x] Analytics Engine telemetry helpers (`createAnalyticsRecorder`)
+- [x] **Multi-region bench harness** _(ShipCru fork)_ — `examples/probe-worker` exposes `POST /probe` and fans out to `locationHint`-pinned `ProbeDurableObject`s in nine CF regions. The `/bench` UI in `examples/opennextjs-do` consumes it. See [Benchmark results](#benchmark-results-multi-region-signup-p50).
 - [ ] Active-DO dashboard endpoint (`GET /api/auth/admin/active-objects`)
-- [ ] Benchmark suite with geo-distributed runners
+- [ ] Benchmark suite with geo-distributed runners on a cron (currently invoked manually)
+
+## Architecture (ShipCru fork)
+
+```
+                 ┌───────────────────────────────────────────┐
+                 │           CF edge (any colo)              │
+                 │                                           │
+   user ───────► │  Hono Worker (better-auth-cloudflare)     │
+                 │   │                                       │
+                 │   │   1. PBKDF2/scrypt + HMAC pepper      │
+                 │   │   2. session = signed cookie          │
+                 │   │      (no KV PUT in stateless mode)    │
+                 │   ▼                                       │
+                 │  do-adapter (createDoAdapter)             │
+                 │   │  ┌────────────┐ ┌──────────────────┐  │
+                 │   │  │identityIndex│ │ d1IdentityStore  │  │
+                 │   │  │ cache (KV+D1)│ │ (UNIQUE INSERT) │  │
+                 │   │  │ — read path │ │ — source of truth│  │
+                 │   │  │              │ │  when enabled    │  │
+                 │   │  └─────┬───────┘ └────┬─────────────┘  │
+                 │   ▼        ▼              ▼                │
+                 │  ┌─────────────────────────────────────┐   │
+                 │  │ Cloudflare bindings                 │   │
+                 │  │  USER_DO  : per-principal DO (SQLite)│  │
+                 │  │  IDENTITY_DO: per-email-hash DO     │   │
+                 │  │  KV       : session mirror (optional)│  │
+                 │  │  AUTH_DB  : D1 in enam              │   │
+                 │  │             ├─ identity_unique      │   │
+                 │  │             ├─ identity_index (cache)│   │
+                 │  │             └─ users + accounts (DR)│   │
+                 │  └─────────────────────────────────────┘   │
+                 └───────────────────────────────────────────┘
+```
+
+**Two DO classes, one D1, one KV.** `UserDurableObject` is the per-principal source of truth (BA's `user` + `account` models in SQLite). `IdentityDurableObject` holds the `sha256(email) → principal_id` uniqueness map and is the consistency floor for the default path. In the `d1-unique` path the IdentityDO is bypassed entirely; D1's `UNIQUE` constraint is the consistency floor instead.
+
+**Sibling deploys for A/B.** `examples/hono-do/wrangler.toml` defines ten sibling environments (`current`, `thick`, `fast_hash`, `pbkdf2`, `kv_cache`, `stacked`, `recommended`, `stateless`, `d1_unique`, `d1_unique_stateless`). Each gets its own DO namespace + KV + D1 binding so bench comparisons are clean. Same source code; behaviour switched by env vars (`USE_PBKDF2`, `USE_KV_CACHE`, `USE_BUNDLE_RPC`, `USE_STATELESS_SESSION`, `USE_D1_IDENTITY`, `USE_FAST_HASH`, `USE_THICK_IDENTITY`).
+
+**Bench harness.** `examples/probe-worker` exposes `POST /probe { variantId, op, n, regions? }`. It owns nine `ProbeDurableObject`s — one per CF region, pinned via `locationHint`. Each probe holds service bindings to all ten variants and invokes them by `bindingName`. Fan-out is `Promise.all` across regions, sequential `n` calls per region. `examples/opennextjs-do/src/app/bench` is the user-facing UI.
+
+**Hot-path cost model.** Signup latency = `cross-region D1 INSERT (200–500 ms)` + `PBKDF2/scrypt CPU (250–600 ms)` + `local UserDO create (5–30 ms)`. Signin latency = `D1 lookup via Sessions API (50–250 ms)` + `cookie decrypt (1–5 ms)`. The biggest knob is whether the password hash is JS scrypt (slow) or native PBKDF2 (fast) — see `src/auth/*.ts`.
+
+## Benchmark results (multi-region)
+
+n=30 per region per op, 2026-05-19, D1 primary in `enam` with read-replication off. All times in ms (p50). Lower is better.
+
+**Signup p50 (ms)**
+
+| variant                                     |    wnam |    enam |     sam |    weur |    eeur |    apac |       oc |      me |     afr |
+| ------------------------------------------- | ------: | ------: | ------: | ------: | ------: | ------: | -------: | ------: | ------: |
+| current (baseline)                          |    2145 |    1857 |    1771 |    1398 |    1728 |    3154 |     3506 |    1680 |    1476 |
+| thick-identity                              |    2142 |    1939 |    1873 |    1377 |    1840 |    3212 |     3446 |    1826 |    1466 |
+| fast-hash (scrypt N=4096)                   |    1849 |    1743 |    1603 |    1179 |    1640 |    3092 |     3325 |    1677 |    1221 |
+| pbkdf2-fast                                 |    1956 |    1788 |    1620 |    1207 |    1668 |    3086 |     3370 |    1676 |    1185 |
+| kv-cache                                    |    2145 |    1993 |    1911 |    1379 |    1849 |    3169 |     3418 |    1684 |    1454 |
+| stacked (fast-hash + kv-cache)              |    1877 |    1723 |    1600 |    1204 |    1578 |    3094 |     3315 |    1621 |    1243 |
+| recommended (pbkdf2 + pepper + kv + bundle) |    1876 |    1767 |    1601 |    1146 |    1575 |    3113 |     3347 |    1525 |    1203 |
+| stateless (recommended − KV session)        |    1319 |    1284 |    1173 |    1125 |    1429 |    1608 |     1715 |    1452 |    1114 |
+| d1-unique                                   |    1350 |    1219 |    1156 |     801 |    1101 |    2466 |     2747 |    1054 |     847 |
+| **d1-unique-stateless**                     | **733** | **762** | **636** | **733** | **945** | **983** | **1054** | **868** | **744** |
+
+**Signin p50 (ms)**, warm same-user
+
+| variant                 |   wnam |    enam |     sam |    weur |    eeur |    apac |      oc |      me |     afr |
+| ----------------------- | -----: | ------: | ------: | ------: | ------: | ------: | ------: | ------: | ------: |
+| current (baseline)      |    734 |     590 |     612 |     326 |     378 |    1377 |    1580 |     429 |     214 |
+| thick-identity          |    706 |     582 |     559 |     151 |     282 |    1334 |    1547 |     293 |     191 |
+| fast-hash               |    510 |     423 |     430 |     137 |     203 |    1237 |    1421 |     275 |     138 |
+| pbkdf2-fast             |    502 |     423 |     416 |     117 |     225 |    1224 |    1416 |     387 |     139 |
+| kv-cache                |    750 |     611 |     587 |     148 |     351 |    1372 |    1490 |     359 |     194 |
+| stacked                 |    521 |     493 |     458 |      95 |     195 |    1226 |    1339 |     191 |     148 |
+| recommended             |    513 |     440 |     411 |      83 |     170 |    1220 |    1387 |     152 |      86 |
+| stateless               |     24 |      33 |      21 |      19 |      26 |      21 |      12 |      35 |      22 |
+| d1-unique               |    589 |     472 |     407 |     188 |     314 |    1396 |    1537 |     348 |     233 |
+| **d1-unique-stateless** | **60** | **136** | **109** | **185** | **212** | **148** | **227** | **214** | **202** |
+
+**Winner across both ops: `d1-unique-stateless`.** Signup sub-1s p50 in 6/9 regions (worst: 1054 ms OC, −70% vs current); signin sub-230 ms global (−84% vs current). `stateless` is faster on signin alone (sub-40 ms — pure cookie verify) because it skips the email-lookup; if you don't need new signups going through D1, `stateless` is the pick.
+
+The `d1-unique-stateless` combo wins because the only cross-region cost on its signup path is the D1 `INSERT` to the `enam` primary, and signin reads the same primary via Sessions API. Dropping BA's `secondaryStorage` KV PUT removes the second cross-region hop that hurt the `d1-unique` baseline in APAC.
+
+Source JSONs in `/tmp/bench-signup-n30.json`, `/tmp/bench-signin-n30.json`, `/tmp/bench-signup-enam-*.json`, `/tmp/bench-signin-fixed-*.json`. Re-run with `examples/probe-worker` `POST /probe { variantId, op, n }`.
+
+## Multi-region D1 + jurisdiction routing plan
+
+**Current state.** A single D1 (`ba-cf-do-recovery`) holds three tables:
+
+| table                | role                                                                             | source-of-truth?                                         |
+| -------------------- | -------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `identity_unique`    | `email_hash → principal_id`, UNIQUE constraint backs the `d1-unique` signup path | **yes** (when `USE_D1_IDENTITY=1`)                       |
+| `identity_index`     | KV+D1 cache for `email → principal_id`; version-stamped                          | no (cache; `identity_unique` or IdentityDO is the floor) |
+| `users` + `accounts` | DR mirror written one-way from UserDO via the outbox                             | no (DOs are the source of truth)                         |
+
+Two of those three (`identity_unique`, `users`) hold per-principal PII (email, name, image). That's what makes residency a hard requirement — putting EU users' rows in a US D1 violates GDPR.
+
+**Phase 1 — move primary to enam (this PR).** A single D1 primary in `enam`. NA traffic is fast (same continent), EU traffic is fast-ish (one ocean hop). Replaces today's `wnam`-ish placement. No app changes — just `wrangler d1 create --location enam` and rebind. Validated by bench delta on `weur` and `enam` rows.
+
+**Phase 2 — EU primary + per-principal `home_region`.** Add a second D1 (`ba-cf-do-recovery-eu`) with the same schema, primary in `weur`. Introduce:
+
+- A jurisdiction config: `{ enam: { d1: AUTH_DB_NA }, weur: { d1: AUTH_DB_EU } }`.
+- A `home_region` field on each principal, decided at signup from `cf.continent` (with an explicit user override for legal residency). Stored in the UserDO's principal record + mirrored to D1.
+- A routing layer that, given an email, has to find `principal_id` _and_ `home_region` together. Two options:
+    1. **Replicated identity index in KV** — single KV namespace (KV is global anyway) keyed by `email_hash` holds `{principalId, homeRegion, version}`. Lookup is one KV GET. PII is just the email hash. Falls back to fan-out (parallel `lookup` against every regional D1) on KV miss.
+    2. **Identity lookup in a tiny global D1** — only `identity_unique` lives in a global D1 (primary anywhere — wnam is fine); the heavy PII tables (`users`, `accounts`) live in the regional D1 picked by `home_region`. Heavier than KV but gives a strict-consistent uniqueness check.
+- A new `multiRegionAdapter(config)` factory that wraps the existing `createDoAdapter` and dispatches reads/writes to the correct regional `d1IdentityStore` + downstream `authDataStore`.
+
+**Phase 3 — APAC primary if traffic justifies it.** Same pattern, `ba-cf-do-recovery-apac` in `apac`. The bench shows APAC's signup tax against an enam primary is ~250 ms — only worth a third primary if APAC becomes a top-3 traffic region.
+
+**Phase 4 — sharding inside a region.** When any one regional D1 nears the 10 GB ceiling, shard on `hash(principal_id) % N` across N sibling DBs in the same jurisdiction. The routing layer composes naturally — `(homeRegion, shardId)` becomes the routing key.
+
+**Open questions deliberately deferred:**
+
+- Cross-jurisdiction account move (EU user moves to US). Probably "create new principal, link old via account merge, deprecate old". No data crosses borders.
+- Replication for read-locality within a jurisdiction. D1 Sessions API already gives us nearest-replica reads inside a primary's region; the multi-region pattern above is about _write_ primary placement, not replicas.
+- Hyperdrive (Postgres) variant of the same pattern, for users who want a real DB.
+
+## UserDO pre-warm pool (planned)
+
+Today every new signup creates a fresh `UserDO` via `idFromName(principalId)`. The first RPC into a brand-new DO eats a cold-start tax (50-300 ms typical, more in distant regions) that the bench attributes to "DO cold-start" but the user sees as "slow signup."
+
+Pre-warm pool design:
+
+- **Pool size.** Maintain `M` (e.g., 50) ready-to-use DOs per region, keyed `pool:<region>:<n>` for n in 0..M.
+- **Cron** — every minute, a Worker scheduled job iterates regions, checks the pool depth via a `PoolManagerDO` (one per region, locationHint-pinned), and tops up via concurrent `userStub.warm()` calls. `warm()` initialises storage, ensures the SQLite table exists, sets `claimed_at = null`.
+- **Claim at signup.** When `createUser` runs, instead of `idFromName(principalId)`, the adapter calls `PoolManagerDO.claim(region)` → returns a `pooled_<uuid>` DO. That DO transactionally sets `principal_id = …, claimed_at = now()` and is no longer in the pool. The created principal record uses the pooled DO's name as its id.
+- **Where the win is.** First user-facing RPC into the DO is now warm (already initialised + storage cached). Saves the per-DO cold-start tax. Biggest impact in APAC/OC where cold starts are ~300 ms.
+- **Trade-offs.** (1) ID is no longer derivable from the principal — needs the claim step. (2) Stale principals in the pool cost storage (mitigate: cron drops any pooled DO with `claimed_at = null && created_at < 24h` and re-warms). (3) Adds one DO RPC (claim) to signup — but it's local + tiny, so net negative latency.
+
+Deferred to a follow-up PR because it requires the cron + PoolManagerDO + claim semantics + thorough testing — non-trivial scope.
 
 ## Table of Contents
 
@@ -175,6 +303,10 @@ Demo implementations are available in the [`examples/`](./examples/) directory f
     - [7. Initialize the Client](#7-initialize-the-client)
 - [Usage Examples](#usage-examples)
     - [Accessing Geolocation Data](#accessing-geolocation-data)
+- [Architecture (ShipCru fork)](#architecture-shipcru-fork)
+- [Benchmark results (multi-region)](#benchmark-results-multi-region)
+- [Multi-region D1 + jurisdiction routing plan](#multi-region-d1--jurisdiction-routing-plan)
+- [UserDO pre-warm pool (planned)](#userdo-pre-warm-pool-planned)
 - [R2 File Storage Guide](./docs/r2.md)
 - [Configuration Reference](./docs/configuration.md)
 - [License](#license)

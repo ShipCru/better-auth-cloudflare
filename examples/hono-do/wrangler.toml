@@ -381,5 +381,51 @@ dataset = "ba_cf_do_events"
 
 [[env.d1_unique.d1_databases]]
 binding = "AUTH_DB"
+database_name = "ba-cf-do-recovery-enam"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+# d1-unique + stateless: combines D1 UNIQUE identity (fast EU/NA) with
+# the stateless session strategy (drops BA's secondaryStorage KV PUT).
+# Targets APAC, where the KV write back to a central region was the
+# dominant cost in bench (~500ms). Expected APAC p50 ~1900ms (down
+# from 2415 d1-unique only), keeps EU/NA sub-900ms.
+#
+#   wrangler secret put BETTER_AUTH_SECRET --env d1_unique_stateless
+#   wrangler secret put BETTER_AUTH_PEPPER --env d1_unique_stateless
+#   wrangler deploy --env d1_unique_stateless
+[env.d1_unique_stateless]
+name = "better-auth-cloudflare-hono-do-d1-unique-stateless"
+
+[env.d1_unique_stateless.observability]
+enabled = true
+
+[env.d1_unique_stateless.vars]
+USE_PBKDF2 = "1"
+USE_D1_IDENTITY = "1"
+USE_BUNDLE_RPC = "1"
+USE_STATELESS_SESSION = "1"
+
+[[env.d1_unique_stateless.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.d1_unique_stateless.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.d1_unique_stateless.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.d1_unique_stateless.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.d1_unique_stateless.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+[[env.d1_unique_stateless.d1_databases]]
+binding = "AUTH_DB"
 database_name = "ba-cf-do-recovery"
 database_id = "00000000-0000-0000-0000-000000000000"

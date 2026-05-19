@@ -31,13 +31,6 @@ export const BACKEND_VARIANTS = [
             "Sibling deploy with thickIdentity=true. Sign-in is ONE DO RPC: IdentityDO.signInLookup returns principal + accounts from its denormalised thick_cache. Writes fan-out to both DOs.",
     },
     {
-        id: "d1-unique",
-        binding: "AUTH_BACKEND_D1",
-        label: "D1 UNIQUE replaces IdentityDO (not yet deployed)",
-        description:
-            "Sibling deploy that drops IdentityDO and uses a D1 table with UNIQUE(email_hash) for uniqueness. Expected: -1 to -4s on signup p95.",
-    },
-    {
         id: "kv-cache",
         binding: "AUTH_BACKEND_KV_CACHE",
         label: "KV cache for email→principal_id (with D1 second tier) — live",
@@ -84,7 +77,14 @@ export const BACKEND_VARIANTS = [
         binding: "AUTH_BACKEND_D1_UNIQUE",
         label: "D1 UNIQUE: replace IdentityDO with D1 INSERT — live",
         description:
-            "Replaces IdentityDO's reserve+commit pair with a single D1 INSERT bound by UNIQUE constraint. Eliminates the per-email DO cold-start tax that dominates signup (~300-1500ms in non-NA regions). Also bundles PBKDF2 + bundle-RPC. Sign-in lookups read via D1 Sessions API (nearest replica). This PR also adds parallel optimizations: createPrincipal||commit, scrypt||reserve pre-fire, identityIndexCache.upsert+thick→waitUntil.",
+            "Replaces IdentityDO's reserve+commit pair with a single D1 INSERT bound by UNIQUE constraint. Eliminates the per-email DO cold-start tax that dominates signup (~300-1500ms in non-NA regions). Also bundles PBKDF2 + bundle-RPC. Sign-in lookups read via D1 Sessions API (nearest replica). Identity-cache and thick-cache writes deferred via waitUntil.",
+    },
+    {
+        id: "d1-unique-stateless",
+        binding: "AUTH_BACKEND_D1_UNIQUE_STATELESS",
+        label: "D1 UNIQUE + stateless session — live",
+        description:
+            "d1-unique combo with the stateless session strategy (drops BA's secondaryStorage KV PUT). Targets APAC, where the KV write back to a central region was the dominant cost in n=30 bench (~500-1000ms). Expected APAC p50 ~1900ms (down from 2415 d1-unique alone); EU/NA stay sub-900ms.",
     },
 ] as const;
 

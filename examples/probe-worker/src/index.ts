@@ -38,6 +38,7 @@ const VARIANT_TO_BINDING: Record<string, string> = {
     recommended: "AUTH_BACKEND_RECOMMENDED",
     stateless: "AUTH_BACKEND_STATELESS",
     "d1-unique": "AUTH_BACKEND_D1_UNIQUE",
+    "d1-unique-stateless": "AUTH_BACKEND_D1_UNIQUE_STATELESS",
 };
 
 const app = new Hono<{ Bindings: Env }>();
@@ -58,7 +59,7 @@ app.post("/probe", async c => {
         return c.json({ error: `unknown variantId: ${body.variantId}` }, 400);
     }
     const op: ProbeOp = (body.op ?? "signin") as ProbeOp;
-    const n = Math.max(1, Math.min(20, body.n ?? 5));
+    const n = Math.max(1, Math.min(50, body.n ?? 5));
     const selected: RegionId[] =
         Array.isArray(body.regions) && body.regions.length > 0
             ? body.regions.filter((r): r is RegionId => REGIONS.some(R => R.id === r))

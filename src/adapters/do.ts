@@ -441,6 +441,18 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                                 let lookup: { principalId: string; version: number } | null = null;
                                 if (principalIdFromCache) {
                                     lookup = { principalId: principalIdFromCache, version: 0 };
+                                } else if (config.d1IdentityStore) {
+                                    // D1-UNIQUE path: createUser wrote to identity_unique
+                                    // instead of IdentityDO, so signin's lookup must read
+                                    // there too. D1 Sessions API kicks in inside the store
+                                    // for nearest-replica reads.
+                                    lookup = await config.d1IdentityStore.lookup(emailHash);
+                                    if (lookup) {
+                                        log.info("findOne.email.d1_hit", { version: lookup.version });
+                                        if (config.identityIndexCache) {
+                                            void config.identityIndexCache.upsert(emailHash, lookup).catch(() => {});
+                                        }
+                                    }
                                 } else {
                                     // @ts-expect-error
                                     lookup = (await idStub.lookup(emailHash)) as {
@@ -449,8 +461,7 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                                     } | null;
                                     if (lookup && config.identityIndexCache) {
                                         // Backfill cache for next reader. Non-blocking.
-                                        const entry = { principalId: lookup.principalId, version: lookup.version };
-                                        void config.identityIndexCache.upsert(emailHash, entry).catch(() => {});
+                                        void config.identityIndexCache.upsert(emailHash, lookup).catch(() => {});
                                     }
                                 }
                                 if (!lookup) return null;

@@ -74,6 +74,11 @@ service = "better-auth-cloudflare-hono-do-stateless"
 binding = "AUTH_BACKEND_D1_UNIQUE"
 service = "better-auth-cloudflare-hono-do-d1-unique"
 
+# D1 UNIQUE + stateless: combo variant — drops KV session write for APAC.
+[[services]]
+binding = "AUTH_BACKEND_D1_UNIQUE_STATELESS"
+service = "better-auth-cloudflare-hono-do-d1-unique-stateless"
+
 # Probe Worker — owns the regional ProbeDurableObject instances.
 # `POST /probe` fans out to all CF regions via locationHint-pinned DOs.
 # Bench page calls this for the "Run from all regions" feature.

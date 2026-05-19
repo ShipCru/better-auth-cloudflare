@@ -66,14 +66,14 @@ export function createD1IdentityStore(db: D1Database, log?: Logger): D1IdentityS
                     )
                     .bind(emailHash, principalId, new Date().toISOString())
                     .run();
-                return { ok: true } as const;
+                return { ok: true };
             } catch (err) {
                 const msg = String((err as Error)?.message ?? err);
                 // D1 surfaces UNIQUE violations as "UNIQUE constraint failed".
                 // Both branches end up rolling back; treat anything UNIQUE-y
                 // as "taken" so the caller can return EMAIL_ALREADY_EXISTS.
-                if (/UNIQUE/i.test(msg) || /constraint/i.test(msg)) {
-                    return { ok: false, reason: "taken" } as const;
+                if (/UNIQUE|constraint/i.test(msg)) {
+                    return { ok: false, reason: "taken" };
                 }
                 log?.warn("d1-identity.insertOrFail unknown error", { err: msg });
                 throw err;
@@ -93,8 +93,7 @@ export function createD1IdentityStore(db: D1Database, log?: Logger): D1IdentityS
                     )
                     .bind(emailHash)
                     .first()) as { principal_id: string; version: number } | null;
-                if (!row) return null;
-                return { principalId: String(row.principal_id), version: Number(row.version) };
+                return row ? { principalId: String(row.principal_id), version: Number(row.version) } : null;
             } catch (err) {
                 log?.warn("d1-identity.lookup failed", { err: (err as Error)?.message });
                 return null;

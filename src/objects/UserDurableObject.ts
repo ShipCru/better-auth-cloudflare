@@ -187,6 +187,12 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
         include?: ReadonlyArray<"accountsJson">;
         userId?: string;
     }): Promise<PrincipalRecord | { principal: PrincipalRecord; accountsJson: string } | null> {
+        // Defence-in-depth: cap the bundle-RPC response size. A malicious
+        // or buggy write that ballooned the accounts row would otherwise
+        // let the caller pull arbitrary memory across the RPC boundary.
+        // 1 MB is far more than any legitimate auth user needs (typical:
+        // 1-5 accounts × ~500 bytes each).
+        const BUNDLE_MAX_BYTES = 1_048_576;
         return timed(
             this.log,
             "findPrincipal",
@@ -203,13 +209,90 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
                     this.ctx.storage.sql,
                     `SELECT * FROM accounts ORDER BY created_at`
                 ).toArray() as unknown as RawAccount[];
-                return {
-                    principal,
-                    accountsJson: JSON.stringify(accountRows.map(r => toAccount(r, userId))),
-                };
+                const accountsJson = JSON.stringify(accountRows.map(r => toAccount(r, userId)));
+                if (accountsJson.length > BUNDLE_MAX_BYTES) {
+                    this.log.error("findPrincipal.bundle_oversize", {
+                        userId,
+                        bytes: accountsJson.length,
+                        limit: BUNDLE_MAX_BYTES,
+                    });
+                    throw new Error(
+                        `UserDurableObject.findPrincipal: accountsJson exceeds ${BUNDLE_MAX_BYTES} byte limit`
+                    );
+                }
+                return { principal, accountsJson };
             },
             { include: opts?.include?.join(",") ?? "" }
         );
+    }
+
+    // ───── Per-account rate limit scaffold ──────────────────────────────
+    //
+    // Records failed signin attempts in DO storage so an attacker can't
+    // bypass IP rate-limit by rotating IPs. Per-account counter is checked
+    // before password verify; lockout returns 429-style refusal. Adapter
+    // wiring deferred — these are the primitives.
+
+    async recordFailedSignin(): Promise<{ count: number; lockedUntil: string | null }> {
+        return timed(this.log, "recordFailedSignin", async () => {
+            const now = Date.now();
+            const windowMs = 15 * 60 * 1000; // 15 min sliding window
+            const lockoutThreshold = 5;
+            const lockoutMs = 15 * 60 * 1000;
+            // Lazy schema creation so it's safe to call before any other
+            // setup. Idempotent.
+            runSql(
+                this.ctx.storage.sql,
+                `CREATE TABLE IF NOT EXISTS signin_failures (
+                    ts            INTEGER NOT NULL,
+                    locked_until  INTEGER
+                )`
+            );
+            runSql(this.ctx.storage.sql, `DELETE FROM signin_failures WHERE ts < ?`, now - windowMs);
+            runSql(this.ctx.storage.sql, `INSERT INTO signin_failures (ts) VALUES (?)`, now);
+            const row = runSql(
+                this.ctx.storage.sql,
+                `SELECT COUNT(*) AS c FROM signin_failures`
+            ).toArray()[0] as unknown as { c: number };
+            const count = row.c;
+            let lockedUntil: string | null = null;
+            if (count >= lockoutThreshold) {
+                lockedUntil = new Date(now + lockoutMs).toISOString();
+                runSql(
+                    this.ctx.storage.sql,
+                    `UPDATE signin_failures SET locked_until = ? WHERE ts = ?`,
+                    now + lockoutMs,
+                    now
+                );
+            }
+            return { count, lockedUntil };
+        });
+    }
+
+    async checkLockout(): Promise<{ locked: boolean; lockedUntil: string | null }> {
+        return timed(this.log, "checkLockout", async () => {
+            runSql(
+                this.ctx.storage.sql,
+                `CREATE TABLE IF NOT EXISTS signin_failures (
+                    ts            INTEGER NOT NULL,
+                    locked_until  INTEGER
+                )`
+            );
+            const now = Date.now();
+            const row = runSql(
+                this.ctx.storage.sql,
+                `SELECT MAX(locked_until) AS l FROM signin_failures WHERE locked_until > ?`,
+                now
+            ).toArray()[0] as unknown as { l: number | null };
+            if (!row?.l) return { locked: false, lockedUntil: null };
+            return { locked: true, lockedUntil: new Date(row.l).toISOString() };
+        });
+    }
+
+    async clearFailedSignins(): Promise<void> {
+        return timed(this.log, "clearFailedSignins", async () => {
+            runSql(this.ctx.storage.sql, `DELETE FROM signin_failures`);
+        });
     }
 
     async updatePrincipal(patch: Partial<Omit<PrincipalRecord, "id" | "createdAt">>): Promise<PrincipalRecord> {

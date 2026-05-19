@@ -68,21 +68,45 @@ function decodeSecret(s: string): Uint8Array {
         for (let i = 0; i < out.length; i++) out[i] = parseInt(s.slice(i * 2, i * 2 + 2), 16);
         return out;
     }
-    return new Uint8Array(Buffer.from(s, "base64"));
+    // Workers-native base64 (no Node Buffer dep). atob handles standard
+    // base64; the byte-by-byte conversion is portable everywhere atob is.
+    const bin = atob(s);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+}
+
+/**
+ * Per-isolate cache of imported HMAC keys, keyed by pepper-version.
+ * `crypto.subtle.importKey` is sync-cheap but still has overhead;
+ * caching saves ~1-2ms per hash on the warm path. Keys never leave the
+ * isolate (CryptoKey is opaque), and importing the same secret again
+ * produces an equivalent key, so caching is correct.
+ */
+const importedHmacKeys = new Map<string, Promise<CryptoKey>>();
+
+function importHmacKeyCached(pepperHex: string, raw: Uint8Array): Promise<CryptoKey> {
+    let p = importedHmacKeys.get(pepperHex);
+    if (p) return p;
+    p = crypto.subtle.importKey("raw", raw as BufferSource, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    importedHmacKeys.set(pepperHex, p);
+    return p;
+}
+
+function bytesToHex(b: Uint8Array): string {
+    let s = "";
+    for (const v of b) s += v.toString(16).padStart(2, "0");
+    return s;
 }
 
 /**
  * Apply pepper to a password before passing to the underlying hash.
- * Returns a deterministic Uint8Array (raw HMAC bytes); hash function
- * encodes it as a string by treating it as UTF-8-safe via base64.
+ * Returns the HMAC bytes as base64 (well-formed string suitable for
+ * algorithm impls that expect a UTF-8 password — no null bytes).
  */
 export async function peppered(password: string, pepper: Uint8Array): Promise<string> {
-    const key = await crypto.subtle.importKey("raw", pepper as BufferSource, { name: "HMAC", hash: "SHA-256" }, false, [
-        "sign",
-    ]);
+    const key = await importHmacKeyCached(bytesToHex(pepper), pepper);
     const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(password));
-    // Base64 so the algorithm impls (which expect a string) get a
-    // well-formed input without null bytes.
     return base64FromBytes(new Uint8Array(sig));
 }
 

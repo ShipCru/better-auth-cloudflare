@@ -4,12 +4,33 @@ import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import { createAuthEndpoint, getSessionFromCtx } from "better-auth/api";
 import { schema } from "./schema";
 import { createR2Storage, createR2Endpoints } from "./r2";
+import { createDoAdapter } from "./adapters/do";
 import type { D1Database, KVNamespace } from "@cloudflare/workers-types";
 import type { CloudflareGeolocation, CloudflarePluginOptions, WithCloudflareOptions } from "./types";
+
+// Public exports
 export * from "./client";
 export * from "./schema";
 export * from "./types";
 export * from "./r2";
+export { createDoAdapter, type Adapter, type DOAdapterConfig, type WhereClause } from "./adapters/do";
+export { d1AuthDataStore, AUTH_DATA_D1_SCHEMA, type AuthDataStore } from "./adapters/auth-data";
+export { restorePrincipal } from "./adapters/restore";
+export {
+    UserDurableObject,
+    USER_DO_SCHEMA,
+    type PrincipalRecord,
+    type AccountRecord,
+} from "./objects/UserDurableObject";
+export {
+    IdentityDurableObject,
+    IDENTITY_DO_SCHEMA,
+    type ReserveResult,
+    type CommitResult,
+} from "./objects/IdentityDurableObject";
+export { createLogger, sha256Hex, shortHash, type Logger, type LogLevel } from "./logging";
+export { recordAdapterEvent, type AnalyticsRecorder } from "./telemetry/analytics";
+export { createOutboxFlush, type OutboxFlush, type OutboxEvent, type OutboxFlushConfig } from "./outbox";
 
 /**
  * Cloudflare integration for Better Auth
@@ -201,16 +222,39 @@ export const withCloudflare = <T extends BetterAuthOptions>(
         cloudFlareOptions.mysql,
         cloudFlareOptions.d1,
         cloudFlareOptions.d1Native,
+        cloudFlareOptions.do,
     ].filter(Boolean);
     if (dbConfigs.length > 1) {
         throw new Error(
-            "Only one database configuration can be provided. Please provide only one of postgres, mysql, d1, or d1Native."
+            "Only one database configuration can be provided. Please provide only one of postgres, mysql, d1, d1Native, or do."
         );
     }
 
-    let database: ReturnType<typeof drizzleAdapter> | D1Database | undefined;
+    let database: ReturnType<typeof drizzleAdapter> | ReturnType<typeof createDoAdapter> | D1Database | undefined;
     if (cloudFlareOptions.d1Native) {
         database = cloudFlareOptions.d1Native;
+    } else if (cloudFlareOptions.do) {
+        // Durable Object adapter — hot path reads/writes go to per-principal
+        // SQLite-backed DOs. No database call on any user-facing request.
+        // Pair with `kv` for session and verification storage.
+        //
+        // If `cf` was supplied to withCloudflare, thread the request region
+        // metadata through so every adapter log line and telemetry event
+        // carries `requestColo`, `requestCountry`, `requestContinent`,
+        // `requestRegion`. Useful for debugging routing, residency, and
+        // for the active-DO dashboard.
+        const cfSync = cloudFlareOptions.cf && !(cloudFlareOptions.cf instanceof Promise) ? cloudFlareOptions.cf : null;
+        database = createDoAdapter({
+            ...cloudFlareOptions.do,
+            region: cfSync
+                ? {
+                      colo: cfSync.colo ?? null,
+                      country: cfSync.country ?? null,
+                      continent: cfSync.continent ?? null,
+                      region: cfSync.region ?? null,
+                  }
+                : cloudFlareOptions.do.region,
+        });
     } else if (cloudFlareOptions.postgres) {
         database = drizzleAdapter(cloudFlareOptions.postgres.db, {
             provider: "pg",

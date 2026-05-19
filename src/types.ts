@@ -1,7 +1,7 @@
 import type { AuthContext, Session, User } from "better-auth";
 import type { DrizzleAdapterConfig } from "@better-auth/drizzle-adapter";
 import type { DBFieldAttribute } from "better-auth/db";
-import type { D1Database, KVNamespace, R2Bucket } from "@cloudflare/workers-types";
+import type { D1Database, DurableObjectNamespace, KVNamespace, R2Bucket } from "@cloudflare/workers-types";
 import type { drizzle as d1Drizzle } from "drizzle-orm/d1";
 import type { drizzle as mysqlDrizzle } from "drizzle-orm/mysql2";
 import type { drizzle as postgresDrizzle } from "drizzle-orm/postgres-js";
@@ -71,9 +71,97 @@ export interface WithCloudflareOptions extends CloudflarePluginOptions {
     mysql?: DrizzleConfig<typeof mysqlDrizzle>;
 
     /**
+     * Durable Object adapter configuration. Routes BA's `user` and
+     * `account` storage to per-principal Durable Objects with a global
+     * IdentityDurableObject for email uniqueness. Pair with `kv` for
+     * sessions and verification tokens.
+     *
+     * Mutually exclusive with d1, d1Native, postgres, and mysql.
+     *
+     * The owning Worker MUST re-export the DO classes for wrangler to
+     * register them:
+     *
+     * ```ts
+     * export { UserDurableObject, IdentityDurableObject } from "better-auth-cloudflare";
+     * ```
+     */
+    do?: DOConfig;
+
+    /**
      * KV namespace for secondary storage, if you want to use that.
      */
     kv?: KVNamespace;
+}
+
+/**
+ * Durable Object adapter configuration.
+ */
+export interface DOConfig {
+    /** Namespace binding for the per-principal UserDurableObject. */
+    userDo: DurableObjectNamespace;
+    /** Namespace binding for the per-email-hash IdentityDurableObject. */
+    identityDo: DurableObjectNamespace;
+    /** Log level for adapter operations. @default "info" */
+    logLevel?: "debug" | "info" | "warn" | "error";
+    /**
+     * Optional explicit request region. When supplied (or when `withCloudflare`
+     * threads it through from the top-level `cf` option), every adapter log
+     * line and telemetry event carries the colo / country / continent / region
+     * the request hit. Useful for correlating user traffic with DO placement.
+     */
+    region?: {
+        colo?: string | null;
+        country?: string | null;
+        continent?: string | null;
+        region?: string | null;
+    };
+}
+
+/**
+ * Jurisdiction configuration for multi-region residency.
+ *
+ * **Status: SKELETON only.** The runtime router that consumes this config
+ * is planned but not yet implemented. The types are exported now so
+ * downstream projects (e.g. ShipCru) can shape their wrangler.toml and
+ * provisioning scripts against the eventual contract.
+ *
+ * Design:
+ *
+ *   - Each jurisdiction names a set of countries (the resolver maps
+ *     `cf.country` → jurisdiction).
+ *   - `residencyMode: "strict"` (e.g. EU) means data MUST stay in this
+ *     jurisdiction's databases — never falls over to another region.
+ *   - `residencyMode: "flexible"` means data CAN spill to the closest
+ *     available jurisdiction if this one is degraded.
+ *   - `databases` is an array of database configs per jurisdiction —
+ *     enables horizontal sharding within a region. The router picks a
+ *     shard by hashing the principal id.
+ *   - `defaultJurisdiction` is the fallback when no country match exists.
+ *
+ * @see https://github.com/ShipCru/better-auth-cloudflare#roadmap
+ */
+export interface JurisdictionsConfig {
+    jurisdictions: Jurisdiction[];
+    defaultJurisdiction: string;
+}
+
+export interface Jurisdiction {
+    /** Stable identifier, e.g. "eu", "us", "apac". */
+    id: string;
+    /** ISO-3166-1 alpha-2 country codes assigned to this jurisdiction. */
+    countries: string[];
+    /**
+     * `strict`: data created here NEVER leaves these databases (EU pattern).
+     * `flexible`: data MAY fall over to the closest available jurisdiction
+     * if these are degraded.
+     */
+    residencyMode: "strict" | "flexible";
+    /**
+     * One or more database configs per jurisdiction. Each entry can be any
+     * of the supported adapters (d1, d1Native, postgres, mysql, do).
+     * Sharding within a jurisdiction is by `hash(principalId) mod databases.length`.
+     */
+    databases: Array<Pick<WithCloudflareOptions, "d1" | "d1Native" | "postgres" | "mysql" | "do">>;
 }
 
 /**
@@ -83,6 +171,7 @@ export interface CloudflareGeolocation {
     timezone?: string | null;
     city?: string | null;
     country?: string | null;
+    continent?: string | null;
     region?: string | null;
     regionCode?: string | null;
     colo?: string | null;

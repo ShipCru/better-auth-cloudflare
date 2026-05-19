@@ -1,17 +1,39 @@
-# better-auth-cloudflare
+# better-auth-cloudflare (ShipCru fork)
 
-Seamlessly integrate [Better Auth](https://github.com/better-auth/better-auth) with Cloudflare Workers, D1, Hyperdrive, KV, R2, and geolocation services.
+> **Scope**: this fork adds Durable Object support, outbox + recovery helpers,
+> and Drizzle schema exports to upstream `better-auth-cloudflare`. It is
+> still focused on Better Auth. Domain DOs (UserDataDO, ResumeDataDO, etc.)
+> belong in your application — but you can use the exported
+> `createOutboxFlush()` helper to give them the same DO → D1 eventual-
+> consistency sync pattern UserDurableObject uses.
 
-[![NPM Version](https://img.shields.io/npm/v/better-auth-cloudflare)](https://www.npmjs.com/package/better-auth-cloudflare)
-[![NPM Downloads](https://img.shields.io/npm/dt/better-auth-cloudflare)](https://www.npmjs.com/package/better-auth-cloudflare)
+Seamlessly integrate [Better Auth](https://github.com/better-auth/better-auth) with Cloudflare Workers, **Durable Objects**, D1, Hyperdrive, KV, R2, and geolocation services.
+
 [![License: MIT](https://img.shields.io/npm/l/better-auth-cloudflare)](https://opensource.org/licenses/MIT)
 
-**LIVE DEMOS**:
+> **Fork notice.** This is the [ShipCru fork](https://github.com/ShipCru/better-auth-cloudflare)
+> of [`zpg6/better-auth-cloudflare`](https://github.com/zpg6/better-auth-cloudflare)
+> (MIT, Copyright (c) 2025 Zach Grimaldi). Fork additions:
+>
+> - `do` adapter option — store BA `user` and `account` models in
+>   per-principal SQLite-backed Durable Objects. No database call on
+>   any user-facing hot path.
+> - Two-DO model: `UserDurableObject` (per principal) +
+>   `IdentityDurableObject` (per `sha256(email)`, global uniqueness).
+> - `examples/hono-do/` and `examples/opennextjs-do/` — drop-in DO
+>   equivalents of the upstream examples.
+> - Structured logging + Analytics Engine telemetry helpers.
+> - Skeleton types for multi-jurisdiction routing (Phase 2 — see Roadmap).
+>
+> Upstream features (D1, Hyperdrive, KV, R2, geolocation, IP detection,
+> CLI) work unchanged. The fork is additive.
+
+**LIVE DEMOS** (upstream, D1-backed):
 
 - **OpenNextJS**: [https://better-auth-cloudflare.zpg6.workers.dev](https://better-auth-cloudflare.zpg6.workers.dev/)
 - **Hono**: [https://better-auth-cloudflare-hono.zpg6.workers.dev](https://better-auth-cloudflare-hono.zpg6.workers.dev/)
 
-Demo implementations are available in the [`examples/`](./examples/) directory for **OpenNextJS ◆** and **Hono 🔥**, along with recommended scripts for generating database schema, migrating, and more. The library is compatible with any framework that runs on Cloudflare Workers.
+Demo implementations are available in the [`examples/`](./examples/) directory for **OpenNextJS ◆**, **Hono 🔥**, and the new DO-backed variants (`hono-do`, `opennextjs-do`).
 
 ## Features
 
@@ -26,32 +48,54 @@ Demo implementations are available in the [`examples/`](./examples/) directory f
 
 ## Roadmap
 
+**Storage adapters:**
+
 - [x] IP Detection
 - [x] Geolocation
 - [x] D1
 - [x] Hyperdrive (Postgres/MySQL)
 - [x] KV
 - [x] R2
+- [x] **Durable Objects** _(ShipCru fork)_ — DOs as source of truth on the hot path, D1 auth-data store as one-way downstream sync target. See `examples/hono-do`.
+- [x] **Outbox helper** _(ShipCru fork)_ — `createOutboxFlush()` reusable across any DO that needs eventually-consistent sync to a downstream store. See `src/outbox.ts`.
+- [x] **Drizzle schema export** _(ShipCru fork)_ — `import { users, accounts } from "better-auth-cloudflare/db/schema"` for type-safe migrations and queries.
+- [x] **D1 auth data store** _(ShipCru fork)_ — `d1AuthDataStore` + `restorePrincipal` for DR + admin dashboards.
+- [x] **Recovery sync within 10s** _(ShipCru fork)_ — waitUntil-based immediate drain + 3s alarm fallback. Mandatory eventual consistency.
+- [x] **KV-backed sessions** — BA secondaryStorage pattern, unchanged from upstream.
 - [ ] Cloudflare Email
 - [ ] Cloudflare Images
-- [ ] Durable Objects
-- [ ] D1 Multi-Tenancy
+- [ ] **KV read-cache layer for IdentityDO** — globally-cached email→principalId lookups (eliminates cross-region signin RPC). DO stays as the write oracle.
+- [ ] **Multi-database routing for residency** — pluggable per-region database bindings (EU / US / APAC), so EU auth data stays in EU D1 (or Postgres via Hyperdrive). Hard-stop residency boundary.
+- [ ] **Multi-database sharding within a region** — hash principal_id mod N across DB shards inside a jurisdiction. Supports growth beyond a single DB.
+- [ ] **Active DO dashboard** — read-only admin view of active principal DOs with location, region, and storage size
+- [ ] **Benchmark suite** — hot-path latency comparison across D1 / Hyperdrive / DO adapters, with geo-distributed test runners
 
 **CLI:**
 
 - [x] `generate` - Create new projects from Hono/Next.js templates with automatic Cloudflare resource setup
 - [ ] `integrate` - Add `better-auth-cloudflare` to existing projects, creating/updating auth and schema files
 - [x] `migrate` - Update auth schema and run database migrations when configuration changes
+- [ ] `provision` - Read `shipcru-auth.config.ts` (or equivalent) and create per-jurisdiction Cloudflare resources (D1/KV/Hyperdrive/DO namespaces) idempotently
 - [ ] `plugin` - Generate empty Better Auth plugin for quickly adding typesafe endpoints and schema fields
 - [x] `version` - Check the version of the CLI
 - [x] `help` - Show all commands and their usage
 
 **Examples:**
 
-- [x] Hono
-- [x] OpenNextJS
+- [x] Hono (D1)
+- [x] OpenNextJS (D1)
+- [x] **Hono with DO** (`examples/hono-do/`) — full working demo
+- [x] **OpenNextJS with DO** (`examples/opennextjs-do/`) — scaffold + migration recipe
+- [ ] **vinext** — Next.js on Cloudflare via [vinext](https://www.npmjs.com/package/vinext), DO-backed
 - [ ] SvelteKit (+ Hyperdrive)
 - [ ] TanStack Start (+ Durable Objects)
+
+**Observability & testing:**
+
+- [x] Structured logging (`createLogger`)
+- [x] Analytics Engine telemetry helpers (`createAnalyticsRecorder`)
+- [ ] Active-DO dashboard endpoint (`GET /api/auth/admin/active-objects`)
+- [ ] Benchmark suite with geo-distributed runners
 
 ## Table of Contents
 

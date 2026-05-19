@@ -13,10 +13,10 @@ import { TestClient, waitForServer } from "../helpers";
  * Mandatory eventual consistency window: 10s. We assert within 8s to give
  * headroom for CI jitter.
  *
- * Requires the demo to be running with AUTH_RECOVERY_DB bound and the
- * recovery-schema.sql applied:
+ * Requires the demo to be running with AUTH_DB bound and the
+ * auth-data-schema.sql applied:
  *
- *   wrangler d1 execute ba-cf-do-recovery --local --file ./recovery-schema.sql
+ *   wrangler d1 execute ba-cf-do-recovery --local --file ./auth-data-schema.sql
  *   pnpm dev
  */
 const baseUrl = process.env.E2E_BASE_URL ?? "http://localhost:8787";
@@ -36,8 +36,8 @@ interface AdminUsersResponse {
     pagination: { limit: number; offset: number; total: number };
 }
 
-describe("Recovery sync to D1 (<10s guarantee)", () => {
-    it("admin/users requires AUTH_RECOVERY_DB binding (returns 200 not 503)", async () => {
+describe("Auth data sync to D1 (<10s guarantee)", () => {
+    it("admin/users requires AUTH_DB binding (returns 200 not 503)", async () => {
         const r = await fetch(`${baseUrl}/admin/users`);
         expect(r.status).toBe(200);
         const data = (await r.json()) as AdminUsersResponse;

@@ -1,5 +1,12 @@
 # better-auth-cloudflare (ShipCru fork)
 
+> **Scope**: this fork adds Durable Object support, outbox + recovery helpers,
+> and Drizzle schema exports to upstream `better-auth-cloudflare`. It is
+> still focused on Better Auth. Domain DOs (UserDataDO, ResumeDataDO, etc.)
+> belong in your application — but you can use the exported
+> `createOutboxFlush()` helper to give them the same DO → D1 eventual-
+> consistency sync pattern UserDurableObject uses.
+
 Seamlessly integrate [Better Auth](https://github.com/better-auth/better-auth) with Cloudflare Workers, **Durable Objects**, D1, Hyperdrive, KV, R2, and geolocation services.
 
 [![License: MIT](https://img.shields.io/npm/l/better-auth-cloudflare)](https://opensource.org/licenses/MIT)
@@ -49,11 +56,17 @@ Demo implementations are available in the [`examples/`](./examples/) directory f
 - [x] Hyperdrive (Postgres/MySQL)
 - [x] KV
 - [x] R2
-- [x] **Durable Objects** _(ShipCru fork — this PR)_
+- [x] **Durable Objects** _(ShipCru fork)_ — DOs as source of truth on the hot path, D1 auth-data store as one-way downstream sync target. See `examples/hono-do`.
+- [x] **Outbox helper** _(ShipCru fork)_ — `createOutboxFlush()` reusable across any DO that needs eventually-consistent sync to a downstream store. See `src/outbox.ts`.
+- [x] **Drizzle schema export** _(ShipCru fork)_ — `import { users, accounts } from "better-auth-cloudflare/db/schema"` for type-safe migrations and queries.
+- [x] **D1 auth data store** _(ShipCru fork)_ — `d1AuthDataStore` + `restorePrincipal` for DR + admin dashboards.
+- [x] **Recovery sync within 10s** _(ShipCru fork)_ — waitUntil-based immediate drain + 3s alarm fallback. Mandatory eventual consistency.
+- [x] **KV-backed sessions** — BA secondaryStorage pattern, unchanged from upstream.
 - [ ] Cloudflare Email
 - [ ] Cloudflare Images
-- [ ] **Multiple D1 databases for sharding** within a single deploy (hash by principal id)
-- [ ] **Multi-jurisdiction database routing** (one-to-many DBs per region, residency enforcement — see [JurisdictionsConfig](./src/types.ts) for the skeleton API)
+- [ ] **KV read-cache layer for IdentityDO** — globally-cached email→principalId lookups (eliminates cross-region signin RPC). DO stays as the write oracle.
+- [ ] **Multi-database routing for residency** — pluggable per-region database bindings (EU / US / APAC), so EU auth data stays in EU D1 (or Postgres via Hyperdrive). Hard-stop residency boundary.
+- [ ] **Multi-database sharding within a region** — hash principal_id mod N across DB shards inside a jurisdiction. Supports growth beyond a single DB.
 - [ ] **Active DO dashboard** — read-only admin view of active principal DOs with location, region, and storage size
 - [ ] **Benchmark suite** — hot-path latency comparison across D1 / Hyperdrive / DO adapters, with geo-distributed test runners
 

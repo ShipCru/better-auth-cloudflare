@@ -10,5 +10,7 @@ export interface CloudflareBindings {
     IDENTITY_DO: DurableObjectNamespace;
     KV: KVNamespace;
     AUTH_ANALYTICS?: AnalyticsEngineDataset;
-    AUTH_RECOVERY_DB?: D1Database;
+    AUTH_DB?: D1Database;
+    GOOGLE_CLIENT_ID?: string;
+    GOOGLE_CLIENT_SECRET?: string;
 }

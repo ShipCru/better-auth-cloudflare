@@ -1,6 +1,6 @@
 import type { IncomingRequestCfProperties } from "@cloudflare/workers-types";
 import { betterAuth } from "better-auth";
-import { withCloudflare, d1RecoveryStore } from "better-auth-cloudflare";
+import { withCloudflare, d1AuthDataStore } from "better-auth-cloudflare";
 import { anonymous } from "better-auth/plugins";
 import type { CloudflareBindings } from "../env";
 
@@ -31,19 +31,43 @@ function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, 
                       userDo: env.USER_DO,
                       identityDo: env.IDENTITY_DO,
                       logLevel: "info",
-                      // Optional D1 recovery store. When AUTH_RECOVERY_DB is bound
+                      // Optional D1 auth data store. When AUTH_DB is bound
                       // (see wrangler.toml), every successful DO write is
-                      // one-way mirrored to D1 best-effort. The recovery store is
+                      // one-way mirrored to D1 best-effort. The auth data store is
                       // NEVER queried during auth flows — it exists only for DR.
-                      // Use recoverPrincipalFromRecoveryStore() to replay a
+                      // Use restorePrincipal() to replay a
                       // principal back into a DO that lost storage.
-                      recoveryStore: env.AUTH_RECOVERY_DB ? d1RecoveryStore(env.AUTH_RECOVERY_DB) : undefined,
+                      authDataStore: env.AUTH_DB ? d1AuthDataStore(env.AUTH_DB) : undefined,
                   }
                 : undefined,
             kv: env?.KV,
         },
         {
-            emailAndPassword: { enabled: true },
+            emailAndPassword: {
+                enabled: true,
+                // Forgot/reset password flow. In production, replace the
+                // console.log with your transactional email service (Resend,
+                // SendGrid, etc.) and pass the user a reset URL.
+                sendResetPassword: async ({ user, url }) => {
+                    console.log(
+                        `[forgot-password] reset URL for ${user.email}:`,
+                        url,
+                        `(in production, email this to the user)`
+                    );
+                },
+            },
+            // Social providers. Wired conditionally — only enabled if env
+            // credentials are present. Set GOOGLE_CLIENT_ID and
+            // GOOGLE_CLIENT_SECRET via `wrangler secret put` to enable.
+            socialProviders:
+                env?.GOOGLE_CLIENT_ID && env?.GOOGLE_CLIENT_SECRET
+                    ? {
+                          google: {
+                              clientId: env.GOOGLE_CLIENT_ID,
+                              clientSecret: env.GOOGLE_CLIENT_SECRET,
+                          },
+                      }
+                    : undefined,
             plugins: [anonymous()],
             rateLimit: {
                 enabled: true,
@@ -52,6 +76,7 @@ function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, 
                 customRules: {
                     "/sign-in/email": { window: 60, max: 100 },
                     "/sign-up/email": { window: 60, max: 20 },
+                    "/forget-password": { window: 60, max: 10 },
                 },
             },
         }

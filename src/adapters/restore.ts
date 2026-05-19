@@ -1,35 +1,34 @@
 import type { DurableObjectNamespace } from "@cloudflare/workers-types";
-import type { RecoveryStore } from "./recovery";
+import type { AuthDataStore } from "./auth-data";
 
 /**
- * Replays a principal from the recovery store back into the
+ * Replays a principal from the auth data store back into the
  * UserDurableObject. Use on detected DO storage loss.
  *
- * The recovery store is NEVER queried during normal auth flows — it is
- * write-mirrored only by the adapter. This function is the one place
- * the read direction happens, and it is admin-triggered.
+ * The auth data store is NEVER queried during normal auth flows — it is
+ * write-mirrored only via the DO outbox + alarm. This function is the
+ * one place the read direction happens, and it is admin-triggered.
  *
  * Idempotent: re-running on a DO that still has its principal is a
  * no-op (returns `{ restored: false, reason: "principal_already_present" }`).
  *
- * Password hashes are NOT in the recovery store by design. Users
- * restored this way will need to reset their password (or sign in with
- * an alternative provider). This is an intentional security trade-off.
+ * Password hashes are NOT in the store by design. Users restored this
+ * way will need to reset their password (or sign in via OAuth).
  */
-export async function recoverPrincipalFromRecoveryStore(args: {
+export async function restorePrincipal(args: {
     userDo: DurableObjectNamespace;
-    recoveryStore: RecoveryStore;
+    authData: AuthDataStore;
     principalId: string;
 }): Promise<{ restored: boolean; reason?: string }> {
-    const { userDo, recoveryStore, principalId } = args;
+    const { userDo, authData, principalId } = args;
     const stub = userDo.get(userDo.idFromName(principalId));
 
     // @ts-expect-error — DO RPC method
     const existing = await stub.findPrincipal();
     if (existing) return { restored: false, reason: "principal_already_present" };
 
-    const user = await recoveryStore.readUser(principalId);
-    if (!user) return { restored: false, reason: "not_in_recovery_store" };
+    const user = await authData.readUser(principalId);
+    if (!user) return { restored: false, reason: "not_in_auth_data" };
 
     // @ts-expect-error
     await stub.createPrincipal({
@@ -41,7 +40,7 @@ export async function recoverPrincipalFromRecoveryStore(args: {
         isAnonymous: user.isAnonymous,
     });
 
-    const accounts = await recoveryStore.readAccountsForUser(principalId);
+    const accounts = await authData.readAccountsForUser(principalId);
     for (const account of accounts) {
         // @ts-expect-error
         await stub.createAccount({

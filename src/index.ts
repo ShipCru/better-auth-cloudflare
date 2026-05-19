@@ -14,8 +14,8 @@ export * from "./schema";
 export * from "./types";
 export * from "./r2";
 export { createDoAdapter, type Adapter, type DOAdapterConfig, type WhereClause } from "./adapters/do";
-export { d1RecoveryStore, RECOVERY_D1_SCHEMA, type RecoveryStore } from "./adapters/recovery";
-export { recoverPrincipalFromRecoveryStore } from "./adapters/recover";
+export { d1AuthDataStore, AUTH_DATA_D1_SCHEMA, type AuthDataStore } from "./adapters/auth-data";
+export { restorePrincipal } from "./adapters/restore";
 export {
     UserDurableObject,
     USER_DO_SCHEMA,
@@ -30,6 +30,7 @@ export {
 } from "./objects/IdentityDurableObject";
 export { createLogger, sha256Hex, shortHash, type Logger, type LogLevel } from "./logging";
 export { recordAdapterEvent, type AnalyticsRecorder } from "./telemetry/analytics";
+export { createOutboxFlush, type OutboxFlush, type OutboxEvent, type OutboxFlushConfig } from "./outbox";
 
 /**
  * Cloudflare integration for Better Auth

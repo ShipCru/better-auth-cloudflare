@@ -55,8 +55,8 @@ app.get("/health", c => c.json({ status: "ok" }));
  * `session.user.email` against an allow-list or use a separate admin token.)
  */
 app.get("/admin/users", async c => {
-    const db = c.env.AUTH_RECOVERY_DB;
-    if (!db) return c.json({ error: "AUTH_RECOVERY_DB not bound" }, 503);
+    const db = c.env.AUTH_DB;
+    if (!db) return c.json({ error: "AUTH_DB not bound" }, 503);
 
     const limit = Math.min(parseInt(c.req.query("limit") ?? "20", 10), 100);
     const offset = parseInt(c.req.query("offset") ?? "0", 10);
@@ -84,8 +84,8 @@ app.get("/admin/users", async c => {
 
 /** Same but for accounts — shows which providers each user has linked. */
 app.get("/admin/accounts", async c => {
-    const db = c.env.AUTH_RECOVERY_DB;
-    if (!db) return c.json({ error: "AUTH_RECOVERY_DB not bound" }, 503);
+    const db = c.env.AUTH_DB;
+    if (!db) return c.json({ error: "AUTH_DB not bound" }, 503);
     const userId = c.req.query("userId");
     if (!userId) return c.json({ error: "userId query param required" }, 400);
     const result = await db
@@ -183,9 +183,18 @@ const HOME_PAGE = `<!DOCTYPE html>
           <label>Email <input id="si-email" type="email" required></label>
           <label>Password <input id="si-pass" type="password" required></label>
           <button type="submit" class="primary">Sign in</button>
+          <a href="#" id="btn-forgot" style="display:inline-block; margin-left:8px; font-size:0.85rem;">Forgot password?</a>
         </form>
       </details>
+      <details><summary style="cursor:pointer; margin:12px 0;">Sign in with Google</summary>
+        <p style="font-size:0.85rem; color:#6b7280; margin:8px 0;">
+          Requires GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to be set on the Worker.
+        </p>
+        <button id="btn-google" class="primary">Continue with Google</button>
+      </details>
     </div>
+
+    <div id="forgot-result" style="display:none; margin-top:12px; padding:10px; border-radius:4px; background:#dcfce7; color:#166534; font-size:0.9rem;"></div>
 
     <div id="logged-in" style="display:none;">
       <p>Welcome, <span id="user-name" style="font-weight:600;"></span>.</p>
@@ -308,6 +317,26 @@ const HOME_PAGE = `<!DOCTYPE html>
         const pre = document.createElement('pre'); pre.textContent = JSON.stringify(d, null, 2); c.appendChild(pre);
       });
       $('btn-signout').addEventListener('click', async () => { await api('/api/auth/sign-out'); currentUser = null; check(); $('protected-result').textContent = ''; });
+      $('btn-forgot').addEventListener('click', async (ev) => {
+        ev.preventDefault();
+        const email = $('si-email').value || prompt('Email to send reset link to:');
+        if (!email) return;
+        try {
+          await api('/api/auth/forget-password', { email, redirectTo: window.location.origin + '/' });
+          const box = $('forgot-result');
+          box.textContent = 'Password reset link sent. Check the Worker logs (in dev) or your email (in prod) for the reset URL.';
+          box.style.display = 'block';
+        } catch (err) { alert(err.message); }
+      });
+      $('btn-google').addEventListener('click', async () => {
+        try {
+          const r = await api('/api/auth/sign-in/social', { provider: 'google', callbackURL: '/' });
+          const data = await r.json();
+          if (data.url) window.location.href = data.url;
+        } catch (err) {
+          alert('Google sign-in not configured. Set GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET.\\n\\n' + err.message);
+        }
+      });
       $('btn-refresh-debug').addEventListener('click', async () => {
         const r = await timed('/debug/region', () => fetch('/debug/region', { credentials: 'include' }));
         const d = await r.json();

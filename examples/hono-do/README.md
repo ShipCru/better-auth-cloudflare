@@ -116,7 +116,7 @@ rejection, wrong-password rejection, protected route, session expiry,
 multiple-user independence, geolocation. All green on the standard local
 config.
 
-## D1 recovery store for DO restore (optional)
+## D1 auth data store for DO restore (optional)
 
 ### Architecture: auth never falls back to the DB
 
@@ -125,15 +125,15 @@ Sign-in, session validation, find-user-by-email — all go through the DOs.
 The DB is not queried during any auth flow.
 
 When configured, every successful DO write is **one-way** mirrored to a
-D1 database (the recovery store) on a best-effort basis. If a DO loses
-its storage, `recoverPrincipalFromRecoveryStore` replays users +
+D1 database (the auth data store) on a best-effort basis. If a DO loses
+its storage, `restorePrincipal` replays users +
 accounts from D1 back into the DO. That is the only read path.
 
 > **Future:** user-data and resume-data services (separate from auth)
 > will need a different pattern — DO-primary with the DB kept queryable
 > for admin/search/analytics. That's tracked in the package roadmap.
 
-**Password hashes are deliberately NOT mirrored** to the recovery store —
+**Password hashes are deliberately NOT mirrored** to the auth data store —
 they stay in the DO only. A restored user will need to reset their
 password. This is an intentional security trade-off: a recovery-store
 leak does not expose credentials.
@@ -146,21 +146,21 @@ wrangler d1 create ba-cf-do-recovery
 
 # 2. Paste the id into wrangler.toml (uncomment the [[d1_databases]] block)
 #    and apply the schema:
-wrangler d1 execute ba-cf-do-recovery --remote --file ./recovery-schema.sql
+wrangler d1 execute ba-cf-do-recovery --remote --file ./auth-data-schema.sql
 
-# 3. Pass the binding to d1RecoveryStore() in src/auth/index.ts:
-#    (already wired in this demo — fires only when AUTH_RECOVERY_DB is bound)
+# 3. Pass the binding to d1AuthDataStore() in src/auth/index.ts:
+#    (already wired in this demo — fires only when AUTH_DB is bound)
 ```
 
 Recovery flow from the Worker:
 
 ```ts
-import { recoverPrincipalFromRecoveryStore, d1RecoveryStore } from "better-auth-cloudflare";
+import { restorePrincipal, d1AuthDataStore } from "better-auth-cloudflare";
 
 app.post("/admin/recover/:principalId", async c => {
-    const result = await recoverPrincipalFromRecoveryStore({
+    const result = await restorePrincipal({
         userDo: c.env.USER_DO,
-        recoveryStore: d1RecoveryStore(c.env.AUTH_RECOVERY_DB),
+        authDataStore: d1AuthDataStore(c.env.AUTH_DB),
         principalId: c.req.param("principalId"),
     });
     return c.json(result);

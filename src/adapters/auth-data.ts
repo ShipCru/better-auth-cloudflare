@@ -3,20 +3,24 @@ import type { PrincipalRecord, AccountRecord } from "../objects/UserDurableObjec
 import type { Logger } from "../logging";
 
 /**
- * Recovery store for the DO adapter.
+ * Auth data store for the DO adapter.
  *
- * **The recovery store is one-way: DOs sync to it on writes; it is NEVER
- * queried during auth flows.** Auth lookups (sign-in, session validate,
- * find-user-by-email) always go through the Durable Objects — they are
- * the sole source of truth.
+ * The Durable Objects are the source of truth on the hot path. This store
+ * is a one-way downstream sync target: every DO write is mirrored here
+ * via the outbox + alarm + waitUntil pipeline. It is **never** queried
+ * during auth flows. Two use cases:
  *
- * Use: when a DO loses its SQLite storage (rare but possible),
- * `recoverPrincipalFromRecoveryStore` replays users + accounts back into
- * the DO from this store. Recovery is admin-triggered, never automatic.
+ *   1. **Dashboard / admin queries** — list users, search by email,
+ *      paginate, report. Reads go directly against this store via your
+ *      own admin endpoints.
+ *   2. **DR / restore** — if a DO loses its SQLite, replay state from
+ *      here via `restorePrincipal`.
  *
- * `d1RecoveryStore` is the only implementation shipped today.
+ * `d1AuthDataStore` is the only implementation shipped today. The
+ * interface is small enough to back with Postgres via Hyperdrive or any
+ * other store later.
  */
-export interface RecoveryStore {
+export interface AuthDataStore {
     writeUser(user: PrincipalRecord): Promise<void>;
     writeAccount(account: AccountRecord): Promise<void>;
     deleteUser(principalId: string): Promise<void>;
@@ -26,11 +30,13 @@ export interface RecoveryStore {
 }
 
 /**
- * SQL schema for the D1 recovery store. Password hash deliberately NOT
+ * SQL schema for the D1 auth data store. Password hash deliberately NOT
  * mirrored — stays in the DO only. Restored users must reset their
  * password (acceptable trade-off for the rare DO storage-loss event).
+ *
+ * Also exported as Drizzle definitions from `better-auth-cloudflare/db/schema`.
  */
-export const RECOVERY_D1_SCHEMA = `
+export const AUTH_DATA_D1_SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   id                  TEXT PRIMARY KEY,
   name                TEXT,
@@ -56,7 +62,7 @@ CREATE TABLE IF NOT EXISTS accounts (
 CREATE INDEX IF NOT EXISTS accounts_user_idx ON accounts(user_id);
 `;
 
-export function d1RecoveryStore(db: D1Database): RecoveryStore {
+export function d1AuthDataStore(db: D1Database): AuthDataStore {
     return {
         async writeUser(user) {
             await db
@@ -155,13 +161,13 @@ export function d1RecoveryStore(db: D1Database): RecoveryStore {
 }
 
 /**
- * Wraps a recovery-store write so failures log and resolve rather than
- * throwing. The auth hot path must never block on the recovery store.
+ * Wraps an auth-data-store write so failures log and resolve rather than
+ * throwing. The auth hot path must never block on this store.
  */
-export async function bestEffortRecoveryWrite(log: Logger, label: string, fn: () => Promise<void>): Promise<void> {
+export async function bestEffortAuthDataWrite(log: Logger, label: string, fn: () => Promise<void>): Promise<void> {
     try {
         await fn();
     } catch (err) {
-        log.warn("recovery store write failed", { op: label, err: (err as Error)?.message });
+        log.warn("auth data write failed", { op: label, err: (err as Error)?.message });
     }
 }

@@ -1,7 +1,7 @@
 import type { DurableObjectNamespace } from "@cloudflare/workers-types";
 import { createLogger, shortHash, type Logger } from "../logging";
 import type { PrincipalRecord, AccountRecord } from "../objects/UserDurableObject";
-import type { RecoveryStore } from "./recovery";
+import type { AuthDataStore } from "./auth-data";
 
 /**
  * Better Auth adapter backed by per-principal Durable Objects.
@@ -45,17 +45,17 @@ export interface DOAdapterConfig {
      */
     region?: RegionContext;
     /**
-     * Optional recovery store reference. Pass this if you intend to call
-     * `recoverPrincipalFromRecoveryStore` from your Worker — it's not used
+     * Optional auth data store reference. Pass this if you intend to call
+     * `restorePrincipal` from your Worker — it's not used
      * for write-mirroring here.
      *
-     * **Sync to the recovery store is owned by the DO**, not the adapter.
+     * **Sync to the auth data store is owned by the DO**, not the adapter.
      * Bind your D1 database as `AUTH_RECOVERY_DB` in wrangler.toml and the
      * UserDurableObject's outbox + 3s alarm will keep D1 eventually
      * consistent with the DO state (typical lag ~3-6s). See README for
-     * details and the schema in `RECOVERY_D1_SCHEMA`.
+     * details and the schema in `AUTH_DATA_D1_SCHEMA`.
      */
-    recoveryStore?: RecoveryStore;
+    authDataStore?: AuthDataStore;
 }
 
 export interface RegionContext {
@@ -392,7 +392,7 @@ async function createUser(
         // Anonymous users are intentionally NOT mirrored to the fallback.
         // They are ephemeral; replicating them inflates the fallback store
         // with users that mostly never convert. If you need them in your
-        // recovery store, mirror explicitly downstream.
+        // auth data store, mirror explicitly downstream.
         return mapPrincipalToBA(p);
     }
 

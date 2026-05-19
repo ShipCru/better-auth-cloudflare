@@ -31,24 +31,31 @@ id = "YOUR_KV_NAMESPACE_ID"
 binding = "AUTH_ANALYTICS"
 dataset = "ba_cf_do_events"
 
-# Optional: D1 recovery store. When this binding is present (and wired in
-# auth/index.ts via `recoveryStore: d1RecoveryStore(env.AUTH_RECOVERY_DB)`),
+# Optional: D1 auth data store. When this binding is present (and wired in
+# auth/index.ts via `authDataStore: d1RecoveryStore(env.AUTH_DB)`),
 # every successful DO write is one-way mirrored to D1 on a best-effort basis.
-# The recovery store is NEVER queried during auth flows — auth lookups
+# The auth data store is NEVER queried during auth flows — auth lookups
 # always go through the DOs. The store exists for DR only.
-# Use `recoverPrincipalFromRecoveryStore({ userDo, recoveryStore, principalId })`
+# Use `restorePrincipal({ userDo, authDataStore, principalId })`
 # to replay back into the DO on storage loss.
 #
 # Setup (one-time):
 #   wrangler d1 create ba-cf-do-recovery
 #   # paste the id below
-#   wrangler d1 execute ba-cf-do-recovery --remote --file ./recovery-schema.sql
+#   wrangler d1 execute ba-cf-do-recovery --remote --file ./auth-data-schema.sql
 #
 # Wired by default in this demo for local testing. The database_id is a
 # placeholder — wrangler local mode creates an in-memory SQLite. For
 # remote deploy, run `wrangler d1 create ba-cf-do-recovery` and paste the
 # real id here.
 [[d1_databases]]
-binding = "AUTH_RECOVERY_DB"
+binding = "AUTH_DB"
 database_name = "ba-cf-do-recovery"
 database_id = "00000000-0000-0000-0000-000000000000"
+
+# Optional: Google OAuth. Set via secret:
+#   wrangler secret put GOOGLE_CLIENT_ID
+#   wrangler secret put GOOGLE_CLIENT_SECRET
+# When set, the demo's "Continue with Google" button works end-to-end.
+# Callback URL to register in Google Console:
+#   https://your-worker-url/api/auth/callback/google

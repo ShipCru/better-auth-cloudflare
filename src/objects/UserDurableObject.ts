@@ -47,9 +47,9 @@ CREATE TABLE IF NOT EXISTS accounts (
 
 -- Recovery outbox. Every write to principal/accounts enqueues an event.
 -- The DO's alarm (every ~3s) drains pending events to the configured
--- D1 recovery binding (env.AUTH_RECOVERY_DB by convention). Eventually
+-- D1 auth data binding (env.AUTH_DB by convention). Eventually
 -- consistent with a bounded lag (~3-6s under healthy D1, more on retry).
-CREATE TABLE IF NOT EXISTS recovery_outbox (
+CREATE TABLE IF NOT EXISTS auth_outbox (
   event_id            TEXT PRIMARY KEY,
   model               TEXT NOT NULL,
   op                  TEXT NOT NULL CHECK (op IN ('upsert','delete')),
@@ -61,9 +61,9 @@ CREATE TABLE IF NOT EXISTS recovery_outbox (
 );
 `;
 
-const RECOVERY_ALARM_INTERVAL_MS = 3_000;
-const RECOVERY_BATCH_SIZE = 25;
-const RECOVERY_BACKOFF_CAP_S = 30;
+const AUTH_FLUSH_INTERVAL_MS = 3_000;
+const AUTH_FLUSH_BATCH_SIZE = 25;
+const AUTH_FLUSH_BACKOFF_CAP_S = 30;
 
 export interface PrincipalRecord {
     id: string;
@@ -131,8 +131,8 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
         );
         const principal = this.findPrincipalOrThrow();
         if (!principal.isAnonymous) {
-            this.enqueueRecovery("user", "upsert", principal);
-            await this.scheduleRecoveryFlush();
+            this.enqueueAuthEvent("user", "upsert", principal);
+            await this.scheduleAuthFlush();
         }
         return principal;
     }
@@ -177,8 +177,8 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
         runSql(this.ctx.storage.sql, `UPDATE principal SET ${set.join(", ")}`, ...args);
         const principal = this.findPrincipalOrThrow();
         if (!principal.isAnonymous) {
-            this.enqueueRecovery("user", "upsert", principal);
-            await this.scheduleRecoveryFlush();
+            this.enqueueAuthEvent("user", "upsert", principal);
+            await this.scheduleAuthFlush();
         }
         return principal;
     }
@@ -188,8 +188,8 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
         runSql(this.ctx.storage.sql, `DELETE FROM accounts`);
         runSql(this.ctx.storage.sql, `DELETE FROM principal`);
         if (before && !before.isAnonymous) {
-            this.enqueueRecovery("user", "delete", { id: before.id });
-            await this.scheduleRecoveryFlush();
+            this.enqueueAuthEvent("user", "delete", { id: before.id });
+            await this.scheduleAuthFlush();
         }
     }
 
@@ -219,8 +219,8 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
             now
         );
         const account = this.findAccountByIdOrThrow(input.id, input.userId);
-        this.enqueueRecovery("account", "upsert", account);
-        await this.scheduleRecoveryFlush();
+        this.enqueueAuthEvent("account", "upsert", account);
+        await this.scheduleAuthFlush();
         return account;
     }
 
@@ -277,30 +277,30 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
         runSql(this.ctx.storage.sql, `UPDATE accounts SET ${set.join(", ")} WHERE id = ?`, ...args);
         const account = await this.findAccountById(id, userId);
         if (account) {
-            this.enqueueRecovery("account", "upsert", account);
-            await this.scheduleRecoveryFlush();
+            this.enqueueAuthEvent("account", "upsert", account);
+            await this.scheduleAuthFlush();
         }
         return account;
     }
 
     async deleteAccount(id: string): Promise<void> {
         runSql(this.ctx.storage.sql, `DELETE FROM accounts WHERE id = ?`, id);
-        this.enqueueRecovery("account", "delete", { id });
-        await this.scheduleRecoveryFlush();
+        this.enqueueAuthEvent("account", "delete", { id });
+        await this.scheduleAuthFlush();
     }
 
     // ───── Recovery outbox + alarm ───────────────────────────────────────
     //
     // Every state-changing operation enqueues a recovery event. A 3s alarm
-    // drains the outbox to env.AUTH_RECOVERY_DB (if bound) so the recovery
+    // drains the outbox to env.AUTH_DB (if bound) so the recovery
     // store stays eventually consistent within ~3-6s under healthy D1.
     // The auth hot path NEVER waits on the recovery flush — these methods
     // return as soon as the local DO write succeeds.
 
-    private enqueueRecovery(model: "user" | "account", op: "upsert" | "delete", payload: unknown): void {
+    private enqueueAuthEvent(model: "user" | "account", op: "upsert" | "delete", payload: unknown): void {
         runSql(
             this.ctx.storage.sql,
-            `INSERT INTO recovery_outbox (event_id, model, op, payload_json, created_at)
+            `INSERT INTO auth_outbox (event_id, model, op, payload_json, created_at)
        VALUES (?, ?, ?, ?, ?)`,
             crypto.randomUUID(),
             model,
@@ -318,33 +318,33 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
      *   2. Also schedules the alarm as a safety net — if waitUntil fails
      *      (DO restarted, D1 outage, etc.), the alarm catches it and retries.
      */
-    private async scheduleRecoveryFlush(): Promise<void> {
+    private async scheduleAuthFlush(): Promise<void> {
         // Immediate attempt — runs after the response is sent.
-        this.ctx.waitUntil(this.drainRecoveryOutbox().catch(() => 0));
+        this.ctx.waitUntil(this.drainAuthOutbox().catch(() => 0));
         // Alarm fallback — only set if not already scheduled.
         const current = await this.ctx.storage.getAlarm();
         if (current === null) {
-            await this.ctx.storage.setAlarm(Date.now() + RECOVERY_ALARM_INTERVAL_MS);
+            await this.ctx.storage.setAlarm(Date.now() + AUTH_FLUSH_INTERVAL_MS);
         }
     }
 
     async alarm(): Promise<void> {
-        const remaining = await this.drainRecoveryOutbox();
+        const remaining = await this.drainAuthOutbox();
         if (remaining > 0) {
-            await this.ctx.storage.setAlarm(Date.now() + RECOVERY_ALARM_INTERVAL_MS);
+            await this.ctx.storage.setAlarm(Date.now() + AUTH_FLUSH_INTERVAL_MS);
         }
     }
 
     /**
-     * Drains pending recovery_outbox rows to env.AUTH_RECOVERY_DB. Returns
+     * Drains pending auth_outbox rows to env.AUTH_DB. Returns
      * the number of rows still pending after the drain (so caller can
      * decide whether to reschedule the alarm).
      */
-    private async drainRecoveryOutbox(): Promise<number> {
-        const db = (this.env as { AUTH_RECOVERY_DB?: import("@cloudflare/workers-types").D1Database }).AUTH_RECOVERY_DB;
+    private async drainAuthOutbox(): Promise<number> {
+        const db = (this.env as { AUTH_DB?: import("@cloudflare/workers-types").D1Database }).AUTH_DB;
         if (!db) {
-            // No recovery binding — clear pending rows so they don't accumulate.
-            runSql(this.ctx.storage.sql, `DELETE FROM recovery_outbox WHERE sent_at IS NULL`);
+            // No auth data binding — clear pending rows so they don't accumulate.
+            runSql(this.ctx.storage.sql, `DELETE FROM auth_outbox WHERE sent_at IS NULL`);
             return 0;
         }
 
@@ -352,13 +352,13 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
         const pending = runSql(
             this.ctx.storage.sql,
             `SELECT event_id, model, op, payload_json, attempts
-         FROM recovery_outbox
+         FROM auth_outbox
          WHERE sent_at IS NULL
            AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
          ORDER BY created_at
          LIMIT ?`,
             now,
-            RECOVERY_BATCH_SIZE
+            AUTH_FLUSH_BATCH_SIZE
         ).toArray() as unknown as Array<{
             event_id: string;
             model: string;
@@ -372,16 +372,16 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
                 await this.applyRecoveryEvent(db, row.model, row.op, JSON.parse(row.payload_json));
                 runSql(
                     this.ctx.storage.sql,
-                    `UPDATE recovery_outbox SET sent_at = ? WHERE event_id = ?`,
+                    `UPDATE auth_outbox SET sent_at = ? WHERE event_id = ?`,
                     now,
                     row.event_id
                 );
             } catch (err) {
-                const backoff = Math.min(RECOVERY_BACKOFF_CAP_S, 2 ** Math.min(row.attempts, 6));
+                const backoff = Math.min(AUTH_FLUSH_BACKOFF_CAP_S, 2 ** Math.min(row.attempts, 6));
                 const next = new Date(Date.now() + backoff * 1000).toISOString();
                 runSql(
                     this.ctx.storage.sql,
-                    `UPDATE recovery_outbox SET attempts = attempts + 1, next_attempt_at = ? WHERE event_id = ?`,
+                    `UPDATE auth_outbox SET attempts = attempts + 1, next_attempt_at = ? WHERE event_id = ?`,
                     next,
                     row.event_id
                 );
@@ -391,11 +391,11 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
 
         // GC sent rows older than 1 hour so the outbox doesn't grow unbounded.
         const gcCutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-        runSql(this.ctx.storage.sql, `DELETE FROM recovery_outbox WHERE sent_at IS NOT NULL AND sent_at < ?`, gcCutoff);
+        runSql(this.ctx.storage.sql, `DELETE FROM auth_outbox WHERE sent_at IS NOT NULL AND sent_at < ?`, gcCutoff);
 
         const remaining = runSql(
             this.ctx.storage.sql,
-            `SELECT COUNT(*) AS c FROM recovery_outbox WHERE sent_at IS NULL`
+            `SELECT COUNT(*) AS c FROM auth_outbox WHERE sent_at IS NULL`
         ).one() as { c: number };
         return remaining.c;
     }

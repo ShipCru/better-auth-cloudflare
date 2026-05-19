@@ -16,6 +16,32 @@ interface RunRow extends BenchScenarioResult {
     variantLabel: string;
 }
 
+interface RegionalRow {
+    variantId: VariantId;
+    variantLabel: string;
+    op: string;
+    n: number;
+    ts: string;
+    regions: Array<{
+        region: string;
+        hint: string;
+        wallTime: number;
+        result: {
+            colo: string | null;
+            country: string | null;
+            n: number;
+            ok: number;
+            error: number;
+            p50: number;
+            p95: number;
+            p99: number;
+            min: number;
+            max: number;
+        } | null;
+        error: string | null;
+    }>;
+}
+
 export default function BenchPage() {
     const [variantId, setVariantId] = useState<VariantId>("current");
     const [scenarioId, setScenarioId] = useState<ScenarioId>("cold-burst-signup");
@@ -23,6 +49,38 @@ export default function BenchPage() {
     const [running, setRunning] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [rows, setRows] = useState<RunRow[]>([]);
+    const [regionalRows, setRegionalRows] = useState<RegionalRow[]>([]);
+    const [runningRegional, setRunningRegional] = useState(false);
+    const [regionalOp, setRegionalOp] = useState<"signin" | "signup" | "anon" | "get-session">("signin");
+
+    async function runRegional() {
+        setRunningRegional(true);
+        setError(null);
+        try {
+            const res = await fetch("/api/bench/regional", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ variantId, op: regionalOp, n }),
+            });
+            const data = await res.json();
+            if (data?.error) {
+                setError(data.error);
+                return;
+            }
+            setRegionalRows(prev => [
+                {
+                    ...data,
+                    variantId,
+                    variantLabel: variant.label,
+                },
+                ...prev,
+            ]);
+        } catch (err) {
+            setError((err as Error).message);
+        } finally {
+            setRunningRegional(false);
+        }
+    }
 
     const scenario = SCENARIOS.find(s => s.id === scenarioId)!;
     const variant = BACKEND_VARIANTS.find(v => v.id === variantId)!;
@@ -103,7 +161,7 @@ export default function BenchPage() {
                     </div>
                 </div>
 
-                <div className="flex items-end gap-3">
+                <div className="flex items-end gap-3 flex-wrap">
                     <div>
                         <label className="block text-sm font-medium mb-1">N per scenario</label>
                         <input
@@ -115,12 +173,33 @@ export default function BenchPage() {
                             className="w-24 rounded-md border border-gray-300 dark:border-gray-700 dark:bg-gray-800 px-3 py-2 text-sm"
                         />
                     </div>
+                    <div>
+                        <label className="block text-sm font-medium mb-1">Regional op</label>
+                        <select
+                            value={regionalOp}
+                            onChange={e => setRegionalOp(e.target.value as typeof regionalOp)}
+                            className="rounded-md border border-gray-300 dark:border-gray-700 dark:bg-gray-800 px-3 py-2 text-sm"
+                        >
+                            <option value="signin">signin (warm, same user)</option>
+                            <option value="signup">signup (fresh user each iter)</option>
+                            <option value="anon">anon sign-in</option>
+                            <option value="get-session">get-session</option>
+                        </select>
+                    </div>
                     <button
                         onClick={runOne}
-                        disabled={running}
+                        disabled={running || runningRegional}
                         className="rounded-md bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-4 py-2 text-sm font-medium transition-colors"
                     >
-                        {running ? "Running…" : "Run"}
+                        {running ? "Running…" : "Run (this colo)"}
+                    </button>
+                    <button
+                        onClick={runRegional}
+                        disabled={running || runningRegional}
+                        title="Fan out to every Cloudflare region via locationHint-pinned Durable Objects"
+                        className="rounded-md bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-4 py-2 text-sm font-medium transition-colors"
+                    >
+                        {runningRegional ? "Probing all regions…" : `Run ${regionalOp} from all 9 regions`}
                     </button>
                 </div>
 
@@ -131,6 +210,14 @@ export default function BenchPage() {
                 )}
             </div>
 
+            {regionalRows.length > 0 && (
+                <div className="space-y-4">
+                    {regionalRows.map((r, idx) => (
+                        <RegionalCard key={`reg-${r.ts}-${idx}`} row={r} />
+                    ))}
+                </div>
+            )}
+
             {rows.length > 0 && (
                 <div className="space-y-4">
                     {rows.map((r, idx) => (
@@ -139,6 +226,93 @@ export default function BenchPage() {
                 </div>
             )}
         </div>
+    );
+}
+
+function RegionalCard({ row }: { row: RegionalRow }) {
+    const successful = row.regions.filter(r => r.result && r.result.ok > 0);
+    const maxP50 = Math.max(1, ...successful.map(r => r.result!.p50));
+    return (
+        <section className="rounded-lg border border-emerald-200 dark:border-emerald-900 bg-emerald-50/30 dark:bg-emerald-950/20 p-5 shadow-sm">
+            <header className="flex flex-wrap items-baseline justify-between gap-2">
+                <div>
+                    <h2 className="text-base font-semibold">
+                        Regional probe · {row.op} · n={row.n}
+                    </h2>
+                    <p className="text-xs text-gray-500">{row.variantLabel}</p>
+                </div>
+                <div className="flex items-center gap-2 text-xs text-gray-500">
+                    <Pill>{row.regions.length} regions</Pill>
+                    <span>{new Date(row.ts).toLocaleTimeString()}</span>
+                </div>
+            </header>
+
+            <div className="mt-4 overflow-x-auto">
+                <table className="w-full text-sm border-separate border-spacing-0">
+                    <thead>
+                        <tr className="text-left text-xs uppercase text-gray-500">
+                            <th className="pb-2 pr-3 font-medium">Region</th>
+                            <th className="pb-2 pr-3 font-medium">Hint</th>
+                            <th className="pb-2 pr-3 font-medium">ok / n</th>
+                            <th className="pb-2 pr-3 font-medium">p50</th>
+                            <th className="pb-2 pr-3 font-medium">p95</th>
+                            <th className="pb-2 pr-3 font-medium">p99</th>
+                            <th className="pb-2 pr-3 font-medium">min</th>
+                            <th className="pb-2 pr-3 font-medium">max</th>
+                            <th className="pb-2 pr-3 font-medium">distribution</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {row.regions.map(r => {
+                            if (r.error || !r.result) {
+                                return (
+                                    <tr key={r.region} className="border-t border-gray-200 dark:border-gray-800">
+                                        <td className="py-2 pr-3 font-mono">{r.region}</td>
+                                        <td className="py-2 pr-3 text-xs text-gray-500">{r.hint}</td>
+                                        <td colSpan={7} className="py-2 pr-3 text-xs text-red-600 dark:text-red-400">
+                                            {r.error ?? "no result"}
+                                        </td>
+                                    </tr>
+                                );
+                            }
+                            const pct = (r.result.p50 / maxP50) * 100;
+                            return (
+                                <tr key={r.region} className="border-t border-gray-200 dark:border-gray-800">
+                                    <td className="py-2 pr-3 font-mono">{r.region}</td>
+                                    <td className="py-2 pr-3 text-xs text-gray-500">{r.hint}</td>
+                                    <td className="py-2 pr-3 font-mono">
+                                        {r.result.ok}/{r.result.n}
+                                    </td>
+                                    <td className="py-2 pr-3 font-mono">{r.result.p50} ms</td>
+                                    <td className="py-2 pr-3 font-mono">{r.result.p95} ms</td>
+                                    <td className="py-2 pr-3 font-mono">{r.result.p99} ms</td>
+                                    <td className="py-2 pr-3 font-mono text-gray-500">{r.result.min}</td>
+                                    <td className="py-2 pr-3 font-mono text-gray-500">{r.result.max}</td>
+                                    <td className="py-2 pr-3">
+                                        <div className="h-3 w-32 rounded bg-gray-100 dark:bg-gray-800 overflow-hidden">
+                                            <div className="h-full bg-emerald-500/80" style={{ width: `${pct}%` }} />
+                                        </div>
+                                    </td>
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+            </div>
+
+            <details className="mt-3">
+                <summary className="cursor-pointer text-xs text-blue-600 dark:text-blue-400">raw JSON</summary>
+                <pre className="mt-2 rounded bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-900 p-3 text-[10px] overflow-x-auto max-h-64">
+                    {JSON.stringify(row, null, 2)}
+                </pre>
+            </details>
+
+            <p className="mt-3 text-xs text-gray-500">
+                Each row = a Durable Object pinned to that region via <code>locationHint</code>. The DO calls the chosen
+                auth backend from its own colo via service binding. Timings reflect real region-to-region latency,
+                in-isolate (no HTTP/TLS noise).
+            </p>
+        </section>
     );
 }
 

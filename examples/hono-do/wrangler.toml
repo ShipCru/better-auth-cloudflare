@@ -98,3 +98,39 @@ dataset = "ba_cf_do_events"
 
 # Skip D1 for the thick env to remove that variable from the bench
 # comparison. Add it back if you want recovery for the thick deploy too.
+
+# Sibling deploy: same source code, opts into the faster password hash
+# preset (scrypt N=4096 instead of N=16384). See src/auth/fast-hash.ts.
+#
+#   wrangler deploy --env fast_hash
+#
+# Independent DO/KV state from the default deploy. Users created here
+# can ONLY sign in here (hash format incompatible with default).
+[env.fast_hash]
+name = "better-auth-cloudflare-hono-do-fast-hash"
+
+[env.fast_hash.observability]
+enabled = true
+
+[env.fast_hash.vars]
+USE_FAST_HASH = "1"
+
+[[env.fast_hash.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.fast_hash.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.fast_hash.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.fast_hash.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.fast_hash.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"

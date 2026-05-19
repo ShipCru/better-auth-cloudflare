@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import {
     BACKEND_VARIANTS,
     SCENARIOS,
@@ -153,8 +153,8 @@ function ResultCard({ row }: { row: RunRow }) {
                 </div>
                 <div className="flex items-center gap-2 text-xs text-gray-500">
                     <Pill>{row.transport}</Pill>
-                    {row.colo && <Pill>colo {row.colo}</Pill>}
-                    {row.country && <Pill>{row.country}</Pill>}
+                    {row.geo.colo && <Pill>colo {row.geo.colo}</Pill>}
+                    {row.geo.country && <Pill>{row.geo.country}</Pill>}
                     <span>{new Date(row.ts).toLocaleTimeString()}</span>
                 </div>
             </header>
@@ -167,6 +167,8 @@ function ResultCard({ row }: { row: RunRow }) {
                 <Stat label="p95" value={`${row.p95} ms`} />
                 <Stat label="p99" value={`${row.p99} ms`} />
             </div>
+
+            <GeoBlock geo={row.geo} />
 
             <div className="mt-5">
                 <p className="text-xs uppercase tracking-wide text-gray-500 mb-1">Per-iteration durations (ms)</p>
@@ -210,5 +212,35 @@ function Pill({ children }: { children: React.ReactNode }) {
         <span className="inline-flex items-center rounded-full bg-blue-100 dark:bg-blue-950 text-blue-800 dark:text-blue-200 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide">
             {children}
         </span>
+    );
+}
+
+function GeoBlock({ geo }: { geo: BenchScenarioResult["geo"] }) {
+    const rows: Array<[string, string | number | null]> = [
+        ["colo", geo.colo],
+        ["city", geo.city ? `${geo.city}${geo.regionCode ? `, ${geo.regionCode}` : ""}` : null],
+        ["country", geo.country ? `${geo.country}${geo.continent ? ` (${geo.continent})` : ""}` : null],
+        ["postal", geo.postalCode],
+        ["timezone", geo.timezone],
+        ["lat/lng", geo.latitude && geo.longitude ? `${geo.latitude}, ${geo.longitude}` : null],
+        ["ASN", geo.asn && geo.asOrganization ? `${geo.asn} (${geo.asOrganization})` : geo.asn],
+        ["TLS", geo.tlsVersion && geo.tlsCipher ? `${geo.tlsVersion} / ${geo.tlsCipher}` : null],
+    ];
+    const visible = rows.filter(([, v]) => v != null);
+    if (visible.length === 0) return null;
+    return (
+        <details className="mt-4">
+            <summary className="cursor-pointer text-xs text-blue-600 dark:text-blue-400">
+                geo + network metadata
+            </summary>
+            <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs font-mono">
+                {visible.map(([k, v]) => (
+                    <Fragment key={k}>
+                        <dt className="text-gray-500">{k}</dt>
+                        <dd>{String(v)}</dd>
+                    </Fragment>
+                ))}
+            </dl>
+        </details>
     );
 }

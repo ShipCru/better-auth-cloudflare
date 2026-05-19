@@ -5,22 +5,17 @@ compatibility_flags = ["nodejs_compat"]
 
 assets = { directory = ".open-next/assets", binding = "ASSETS" }
 
-[[durable_objects.bindings]]
-name = "USER_DO"
-class_name = "UserDurableObject"
+[observability]
+enabled = true
 
-[[durable_objects.bindings]]
-name = "IDENTITY_DO"
-class_name = "IdentityDurableObject"
-
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
-
-[[kv_namespaces]]
-binding = "KV"
-id = "YOUR_KV_NAMESPACE_ID"
-
-[[analytics_engine_datasets]]
-binding = "AUTH_ANALYTICS"
-dataset = "ba_cf_do_events"
+# This Next.js app is the AUTH FRONTEND. It does not own DOs or KV or D1.
+# All auth-related requests are proxied to the Hono auth Worker (see
+# next.config.ts's `rewrites`), which is where the DOs live. This keeps
+# the OpenNext app a pure UI and avoids the OpenNext + DO local-dev
+# friction (OpenNext's generated Worker doesn't easily re-export DO
+# classes that Miniflare requires for local dev).
+#
+# In production, deploy this Worker and the Hono Worker side by side, then
+# either:
+#   - Same origin via Cloudflare routing (preferred — cookies work natively)
+#   - Different origins + CORS + cookie-domain shared (more setup)

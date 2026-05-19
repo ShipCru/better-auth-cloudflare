@@ -295,3 +295,47 @@ dataset = "ba_cf_do_events"
 binding = "AUTH_DB"
 database_name = "ba-cf-do-recovery"
 database_id = "00000000-0000-0000-0000-000000000000"
+
+# Stateless variant: full recommended stack + USE_STATELESS_SESSION.
+# Drops BA's KV session write on signin (the signed session_data cookie
+# IS the session). Targets sub-300ms p50.
+#
+#   wrangler secret put BETTER_AUTH_SECRET --env stateless
+#   wrangler secret put BETTER_AUTH_PEPPER --env stateless
+#   wrangler deploy --env stateless
+[env.stateless]
+name = "better-auth-cloudflare-hono-do-stateless"
+
+[env.stateless.observability]
+enabled = true
+
+[env.stateless.vars]
+USE_PBKDF2 = "1"
+USE_KV_CACHE = "1"
+USE_BUNDLE_RPC = "1"
+USE_STATELESS_SESSION = "1"
+
+[[env.stateless.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.stateless.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.stateless.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.stateless.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.stateless.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+[[env.stateless.d1_databases]]
+binding = "AUTH_DB"
+database_name = "ba-cf-do-recovery"
+database_id = "00000000-0000-0000-0000-000000000000"

@@ -3,37 +3,7 @@ import { betterAuth } from "better-auth";
 import { withCloudflare, d1AuthDataStore, createIdentityIndexCache } from "better-auth-cloudflare";
 import { anonymous } from "better-auth/plugins";
 import type { CloudflareBindings } from "../env";
-import * as fastHash from "./fast-hash";
-import * as pbkdf2Hash from "./pbkdf2-hash";
-import { pepperKeysetFromEnv, withPepper } from "./pepper";
-
-/**
- * Pick a password hash strategy based on env vars. Precedence:
- *   USE_PBKDF2=1    → Web Crypto PBKDF2 (100k iters SHA-256, CF cap)
- *   USE_FAST_HASH=1 → scrypt(N=4096) via @noble/hashes
- *   (default)       → BA's built-in scrypt(N=16384)
- *
- * The chosen hash format is encoded in each stored hash's prefix so
- * verify() picks the right algorithm. A user created under one preset
- * can only sign in under that preset.
- *
- * When BETTER_AUTH_PEPPER is configured, all variants get HMAC-peppered
- * before the underlying hash function sees them — defends against
- * offline GPU brute-force when the password DB leaks but the pepper
- * (held in Workers Secrets) doesn't. Hash format gains a `p<v>:` prefix
- * for the pepper version so rotation is possible without re-hashing
- * existing rows immediately.
- */
-function pickPasswordConfig(env?: Record<string, string | undefined>) {
-    let inner:
-        | { hash: (p: string) => Promise<string>; verify: (i: { password: string; hash: string }) => Promise<boolean> }
-        | undefined;
-    if (env?.USE_PBKDF2 === "1") inner = { hash: pbkdf2Hash.hash, verify: pbkdf2Hash.verify };
-    else if (env?.USE_FAST_HASH === "1") inner = { hash: fastHash.hash, verify: fastHash.verify };
-    if (!inner) return undefined;
-    const keyset = pepperKeysetFromEnv(env ?? {});
-    return withPepper(inner, keyset);
-}
+import { pickPasswordConfig } from "./password-config";
 
 /**
  * Single auth factory wired to the Durable Object adapter.
@@ -94,7 +64,13 @@ function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, 
                       bundleUserAccounts: env.USE_BUNDLE_RPC === "1",
                   }
                 : undefined,
-            kv: env?.KV,
+            // When USE_STATELESS_SESSION=1 we don't pass KV to
+            // withCloudflare. BA then has no secondaryStorage — sign-in
+            // skips the ~50-100ms KV PUT entirely. The signed session_data
+            // cookie becomes the authoritative session blob; get-session
+            // reads it via cookieCache only. Trade: no remote revocation
+            // (sign-out only clears the user's local cookie).
+            kv: env?.USE_STATELESS_SESSION === "1" ? undefined : env?.KV,
         },
         {
             emailAndPassword: {
@@ -136,9 +112,17 @@ function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, 
                     "/sign-up/email": { window: 60, max: 20 },
                     "/forget-password": { window: 60, max: 10 },
                 },
+                // Stateless mode has no KV; rate limit must use the
+                // in-isolate memory store. Per-isolate counters are
+                // weaker than KV (attacker spreading across isolates
+                // can bypass), but better than nothing for demos.
+                storage: env?.USE_STATELESS_SESSION === "1" ? "memory" : undefined,
             },
         }
     );
+
+    const stateless = env?.USE_STATELESS_SESSION === "1";
+    const expiresIn = 21 * 24 * 60 * 60; // 21 days
 
     return betterAuth({
         baseURL,
@@ -152,15 +136,39 @@ function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, 
             "https://better-auth-cloudflare-opennextjs-do.steve-4b7.workers.dev",
         ],
         ...wrapped,
+        // In stateless mode replace BA's secondaryStorage with a no-op.
+        // Without it, BA falls back to the database adapter for sessions
+        // and our DO adapter throws on `create({model: 'session'})`. The
+        // no-op makes BA's session writes a fire-and-forget — the signed
+        // session_data cookie carries the actual session state, and
+        // get-session reads cookieCache only.
+        secondaryStorage: stateless ? noopSecondaryStorage : wrapped.secondaryStorage,
         session: {
             ...wrapped.session,
             storeSessionInDatabase: false,
-            expiresIn: 21 * 24 * 60 * 60,
+            expiresIn,
             updateAge: 24 * 60 * 60,
-            cookieCache: { enabled: true, maxAge: 5 * 60 },
+            // In stateless mode the cookieCache IS the session — it has
+            // to live as long as the session itself, otherwise get-session
+            // misses fall through to a non-existent KV. In stateful mode
+            // we keep the short 5-minute window so revocation propagates
+            // within that window after KV invalidation.
+            cookieCache: { enabled: true, maxAge: stateless ? expiresIn : 5 * 60 },
         },
     });
 }
+
+/**
+ * Drop-on-the-floor secondaryStorage. Satisfies BA's interface so it
+ * doesn't fall back to the database adapter for session writes, while
+ * actually persisting nothing — the signed session_data cookie is the
+ * only state. Used only when USE_STATELESS_SESSION=1.
+ */
+const noopSecondaryStorage = {
+    get: async (_key: string) => null,
+    set: async (_key: string, _value: string, _ttl?: number) => undefined as void,
+    delete: async (_key: string) => undefined as void,
+};
 
 export const auth = createAuth();
 export { createAuth };

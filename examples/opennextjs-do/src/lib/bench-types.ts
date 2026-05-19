@@ -72,6 +72,13 @@ export const BACKEND_VARIANTS = [
         description:
             "Production-grade stack. Native PBKDF2 (no JS CPU pressure under burst load) + HMAC pepper (defence vs offline DB-leak attacks) + KV identity cache (skip IdentityDO on warm signin) + bundle RPC (one DO call for user+accounts, sidesteps the ~230ms CF list-RPC overhead).",
     },
+    {
+        id: "stateless",
+        binding: "AUTH_BACKEND_STATELESS",
+        label: "Stateless: recommended + drop KV session mirror — live",
+        description:
+            "Full recommended stack + USE_STATELESS_SESSION=1. Still uses BA's DEFAULT session strategy (HMAC-signed session_data cookie) — NOT the better-auth jwt plugin. What changes: the optional secondaryStorage KV mirror is dropped so signin skips the ~50-100ms KV PUT. cookieCache.maxAge extended to session lifetime. Trade: no remote revocation (sign-out clears cookie only). Rate limit drops to in-isolate memory. Targets sub-300ms p50.",
+    },
 ] as const;
 
 export type VariantId = (typeof BACKEND_VARIANTS)[number]["id"];

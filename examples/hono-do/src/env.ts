@@ -33,4 +33,15 @@ export interface CloudflareBindings {
      * scalar-returning RPC. Sidesteps the ~200-300ms CF list-RPC overhead.
      */
     USE_BUNDLE_RPC?: string;
+    /**
+     * "1" drops BA's optional secondaryStorage KV mirror. Sessions still
+     * use BA's DEFAULT strategy (HMAC-signed session_data cookie) — this
+     * does NOT switch to the `better-auth/plugins/jwt` plugin. What
+     * changes: signin skips the ~50-100ms KV PUT (the signed cookie is
+     * sufficient), cookieCache.maxAge is extended to session lifetime so
+     * the cookie covers the full window, rateLimit storage drops to
+     * in-isolate memory. Trade: no remote revocation (sign-out clears
+     * the user's cookie only). Targets sub-300ms sign-in p50.
+     */
+    USE_STATELESS_SESSION?: string;
 }

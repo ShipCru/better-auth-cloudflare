@@ -49,7 +49,10 @@ export class IdentityDurableObject<
 > extends DurableObject<Env> {
     constructor(state: DurableObjectState, env: Env) {
         super(state, env);
-        runSql(this.ctx.storage.sql, IDENTITY_DO_SCHEMA);
+        // See UserDurableObject for the blockConcurrencyWhile rationale.
+        state.blockConcurrencyWhile(async () => {
+            runSql(state.storage.sql, IDENTITY_DO_SCHEMA);
+        });
     }
 
     async reserve(emailHash: string): Promise<ReserveResult> {

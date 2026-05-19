@@ -100,7 +100,13 @@ export interface UserDurableObjectEnv {
 export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObjectEnv> extends DurableObject<Env> {
     constructor(state: DurableObjectState, env: Env) {
         super(state, env);
-        runSql(this.ctx.storage.sql, USER_DO_SCHEMA);
+        // Schema setup must serialise across concurrent first-requests so
+        // two RPCs hitting a cold DO don't race on CREATE TABLE / IF NOT
+        // EXISTS. blockConcurrencyWhile is the documented pattern.
+        // See https://developers.cloudflare.com/durable-objects/best-practices/error-handling/
+        state.blockConcurrencyWhile(async () => {
+            runSql(state.storage.sql, USER_DO_SCHEMA);
+        });
     }
 
     // ───── Principal ─────────────────────────────────────────────────────
@@ -329,7 +335,18 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
     }
 
     async alarm(): Promise<void> {
-        const remaining = await this.drainAuthOutbox();
+        // CF docs: alarms that throw block reschedule logic — wrap the
+        // drain so a transient D1 outage doesn't lose the alarm. The drain
+        // itself catches per-event failures and re-queues with backoff;
+        // this is the second layer of defense for catastrophic failures.
+        let remaining = 0;
+        try {
+            remaining = await this.drainAuthOutbox();
+        } catch (err) {
+            console.error("UserDurableObject.alarm: drain threw", err);
+            // Still reschedule so the next alarm retries.
+            remaining = 1;
+        }
         if (remaining > 0) {
             await this.ctx.storage.setAlarm(Date.now() + AUTH_FLUSH_INTERVAL_MS);
         }

@@ -3,6 +3,7 @@ import { createLogger, shortHash, timed, type Logger } from "../logging";
 import type { PrincipalRecord, AccountRecord } from "../objects/UserDurableObject";
 import type { AuthDataStore } from "./auth-data";
 import type { IdentityIndexCache } from "./identity-cache";
+import type { D1IdentityStore } from "./d1-identity";
 
 /**
  * Better Auth adapter backed by per-principal Durable Objects.
@@ -96,6 +97,35 @@ export interface DOAdapterConfig {
      * findPrincipal() with no opts still returns just the principal).
      */
     bundleUserAccounts?: boolean;
+    /**
+     * Optional ExecutionContext-like object with `waitUntil`. When provided,
+     * non-critical writes (KV/D1 identity cache upsert, thick-cache fan-out)
+     * are dispatched as `waitUntil` so the user response returns before they
+     * complete. Cache writes only matter for the NEXT signin lookup, not
+     * for the current signup response.
+     *
+     * Saves ~50-100ms per signup. Trade: if the Worker crashes after the
+     * response is sent but before waitUntil completes, the cache is briefly
+     * stale (a sign-in within the next few hundred ms might miss); the
+     * IdentityDO is still authoritative, so the user just sees a slightly
+     * slower first sign-in.
+     */
+    deferredWritesCtx?: { waitUntil(p: Promise<unknown>): void };
+    /**
+     * Optional D1-backed identity uniqueness store. When provided, the
+     * adapter skips IdentityDO entirely on signup (no reserve/commit) —
+     * uniqueness comes from D1's UNIQUE constraint via INSERT. Sign-in
+     * lookups read from D1 (Sessions API hits the nearest replica).
+     *
+     * Eliminates the per-email DO cold-start tax (~300-1500ms in
+     * non-NA regions). Trade: D1 is regional vs DOs which are placed
+     * near first writer; cross-region writes can be slower than warm
+     * IdentityDO. Net win is overwhelming for global user bases.
+     *
+     * Build with `createD1IdentityStore(db, log?)`. Apply
+     * `D1_IDENTITY_UNIQUE_SCHEMA` to the bound D1 before first use.
+     */
+    d1IdentityStore?: D1IdentityStore;
 }
 
 export interface RegionContext {
@@ -276,8 +306,18 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                             // RPC instead of three. Fetches the principal + full
                             // account list from UserDO once so the snapshot includes
                             // everything BA's signin path needs.
+                            //
+                            // Defer via waitUntil when an ExecutionContext is
+                            // available — the thick cache update benefits FUTURE
+                            // sign-ins, not the current signup response. Saves
+                            // up to 3 DO RPCs from the response critical path.
                             if (config.thickIdentity) {
-                                await updateThickCache(config, log, userId);
+                                const thickPromise = updateThickCache(config, log, userId);
+                                if (config.deferredWritesCtx) {
+                                    config.deferredWritesCtx.waitUntil(thickPromise);
+                                } else {
+                                    await thickPromise;
+                                }
                             }
                             return mapped as never;
                         }
@@ -337,6 +377,12 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                                 // true, so the includeAccounts branch is what
                                 // matters. We still need to go to the DO for that.
                                 if (!includeAccounts) {
+                                    // Pre-fire of IdentityDO.reserve was removed: when
+                                    // BA's default scrypt hash takes 5–10s, the in-flight
+                                    // DO RPC sits idle long enough for CF to drop it
+                                    // ("Network connection lost"). The fast-hash variants
+                                    // mask the bug; default/thick/kv-cache surface it.
+                                    // The d1-unique path delivers the bigger win anyway.
                                     log.info("findOne.email.skipped_idDO", {});
                                     return null;
                                 }
@@ -671,11 +717,43 @@ async function createUser(
 
     const email = data.email as string;
     const emailHash = await hashEmail(email);
-    const idStub = config.identityDo.get(config.identityDo.idFromName(`identity:${emailHash}`));
 
     log.info("createUser email", { emailHashShort: await shortHash(emailHash) });
 
-    // @ts-expect-error
+    // D1-UNIQUE fast path. When config.d1IdentityStore is set we skip
+    // IdentityDO entirely — no reserve/commit dance, no per-email DO
+    // cold-start tax. Uniqueness comes from D1's UNIQUE constraint via
+    // INSERT. Failure of the insert (UNIQUE violation) means the email
+    // is already taken; we surface EMAIL_ALREADY_EXISTS like the
+    // IdentityDO path does.
+    if (config.d1IdentityStore) {
+        // Insert FIRST: if uniqueness fails, no UserDO write to clean up.
+        const insertResult = await config.d1IdentityStore.insertOrFail(emailHash, principalId);
+        if (!insertResult.ok) {
+            log.warn("createUser email_taken_d1", {
+                emailHashShort: await shortHash(emailHash),
+            });
+            throw new Error("EMAIL_ALREADY_EXISTS");
+        }
+        try {
+            // @ts-expect-error
+            const p = (await userStub.createPrincipal({
+                id: principalId,
+                name: (data.name as string) ?? null,
+                email,
+                emailVerified: (data.emailVerified as boolean) ?? false,
+                image: (data.image as string) ?? null,
+            })) as PrincipalRecord;
+            return mapPrincipalToBA(p);
+        } catch (err) {
+            // Roll back the D1 row on UserDO write failure. Best-effort.
+            await config.d1IdentityStore.disable(emailHash).catch(() => {});
+            throw err;
+        }
+    }
+
+    const idStub = config.identityDo.get(config.identityDo.idFromName(`identity:${emailHash}`));
+    // @ts-expect-error — DO RPC method
     const reserveResult = (await idStub.reserve(emailHash)) as
         | { ok: true; reservationId: string }
         | { ok: false; reason: string; principalId?: string | null };
@@ -689,6 +767,10 @@ async function createUser(
     }
 
     try {
+        // Sequential principal-then-commit. A previous version of this code
+        // fired both in parallel via Promise.all, but if commit lands first
+        // and createPrincipal later fails, the identity index briefly points
+        // at a non-existent principal. Cheap to keep ordered.
         // @ts-expect-error
         const p = (await userStub.createPrincipal({
             id: principalId,
@@ -704,15 +786,22 @@ async function createUser(
         if (!commit.ok) {
             // @ts-expect-error
             await userStub.deletePrincipal();
-            // fall through to throw below — no fallback write if commit failed
             throw new Error(`do-adapter: identity commit failed (${commit.reason})`);
         }
         // Write-through to KV (+ D1) cache so the first sign-in for this
         // user finds the mapping immediately without an IdentityDO RPC.
+        // Defer via waitUntil when an ExecutionContext is available — the
+        // cache write is for FUTURE signin lookups, not the current signup
+        // response. Save ~50-100ms off signup p50.
         if (config.identityIndexCache) {
-            await config.identityIndexCache
+            const cachePromise = config.identityIndexCache
                 .upsert(emailHash, { principalId, version: commit.version })
                 .catch(err => log.warn("identity-cache.upsert failed", { err: (err as Error)?.message }));
+            if (config.deferredWritesCtx) {
+                config.deferredWritesCtx.waitUntil(cachePromise);
+            } else {
+                await cachePromise;
+            }
         }
         return mapPrincipalToBA(p);
     } catch (err) {

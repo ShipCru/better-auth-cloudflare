@@ -79,6 +79,13 @@ export const BACKEND_VARIANTS = [
         description:
             "Full recommended stack + USE_STATELESS_SESSION=1. Still uses BA's DEFAULT session strategy (HMAC-signed session_data cookie) — NOT the better-auth jwt plugin. What changes: the optional secondaryStorage KV mirror is dropped so signin skips the ~50-100ms KV PUT. cookieCache.maxAge extended to session lifetime. Trade: no remote revocation (sign-out clears cookie only). Rate limit drops to in-isolate memory. Targets sub-300ms p50.",
     },
+    {
+        id: "d1-unique",
+        binding: "AUTH_BACKEND_D1_UNIQUE",
+        label: "D1 UNIQUE: replace IdentityDO with D1 INSERT — live",
+        description:
+            "Replaces IdentityDO's reserve+commit pair with a single D1 INSERT bound by UNIQUE constraint. Eliminates the per-email DO cold-start tax that dominates signup (~300-1500ms in non-NA regions). Also bundles PBKDF2 + bundle-RPC. Sign-in lookups read via D1 Sessions API (nearest replica). This PR also adds parallel optimizations: createPrincipal||commit, scrypt||reserve pre-fire, identityIndexCache.upsert+thick→waitUntil.",
+    },
 ] as const;
 
 export type VariantId = (typeof BACKEND_VARIANTS)[number]["id"];

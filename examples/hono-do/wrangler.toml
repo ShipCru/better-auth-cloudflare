@@ -339,3 +339,47 @@ dataset = "ba_cf_do_events"
 binding = "AUTH_DB"
 database_name = "ba-cf-do-recovery"
 database_id = "00000000-0000-0000-0000-000000000000"
+
+# D1-UNIQUE variant: replace IdentityDO with D1's UNIQUE constraint for
+# email uniqueness on signup. One D1 INSERT vs cold reserve+commit on a
+# brand-new IdentityDO (300-1500ms saved on new emails in non-NA).
+# Apply D1_IDENTITY_UNIQUE_SCHEMA before first use.
+#
+#   wrangler secret put BETTER_AUTH_SECRET --env d1_unique
+#   wrangler secret put BETTER_AUTH_PEPPER --env d1_unique
+#   wrangler deploy --env d1_unique
+[env.d1_unique]
+name = "better-auth-cloudflare-hono-do-d1-unique"
+
+[env.d1_unique.observability]
+enabled = true
+
+[env.d1_unique.vars]
+USE_PBKDF2 = "1"
+USE_D1_IDENTITY = "1"
+USE_BUNDLE_RPC = "1"
+
+[[env.d1_unique.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.d1_unique.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.d1_unique.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.d1_unique.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.d1_unique.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+[[env.d1_unique.d1_databases]]
+binding = "AUTH_DB"
+database_name = "ba-cf-do-recovery"
+database_id = "00000000-0000-0000-0000-000000000000"

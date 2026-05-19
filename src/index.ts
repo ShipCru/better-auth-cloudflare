@@ -21,6 +21,12 @@ export {
     type IdentityIndexCache,
     type IdentityIndexEntry,
 } from "./adapters/identity-cache";
+export {
+    createD1IdentityStore,
+    D1_IDENTITY_UNIQUE_SCHEMA,
+    type D1IdentityStore,
+    type D1IdentityResult,
+} from "./adapters/d1-identity";
 export { restorePrincipal } from "./adapters/restore";
 export {
     UserDurableObject,

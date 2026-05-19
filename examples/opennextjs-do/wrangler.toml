@@ -68,6 +68,12 @@ service = "better-auth-cloudflare-hono-do-recommended"
 binding = "AUTH_BACKEND_STATELESS"
 service = "better-auth-cloudflare-hono-do-stateless"
 
+# D1 UNIQUE variant: replaces IdentityDO.reserve+commit with a single D1
+# INSERT under a UNIQUE constraint. Tests signup-path latency parity vs DO.
+[[services]]
+binding = "AUTH_BACKEND_D1_UNIQUE"
+service = "better-auth-cloudflare-hono-do-d1-unique"
+
 # Probe Worker — owns the regional ProbeDurableObject instances.
 # `POST /probe` fans out to all CF regions via locationHint-pinned DOs.
 # Bench page calls this for the "Run from all regions" feature.

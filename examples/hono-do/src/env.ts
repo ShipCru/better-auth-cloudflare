@@ -44,4 +44,11 @@ export interface CloudflareBindings {
      * the user's cookie only). Targets sub-300ms sign-in p50.
      */
     USE_STATELESS_SESSION?: string;
+    /**
+     * "1" replaces IdentityDO with a D1 UNIQUE-constraint store for
+     * email uniqueness on signup. Requires AUTH_DB binding and the
+     * D1_IDENTITY_UNIQUE_SCHEMA applied. Eliminates the per-email DO
+     * cold-start tax (~300-1500ms in non-NA regions on signup).
+     */
+    USE_D1_IDENTITY?: string;
 }

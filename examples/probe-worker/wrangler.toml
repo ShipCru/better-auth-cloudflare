@@ -53,3 +53,7 @@ service = "better-auth-cloudflare-hono-do-recommended"
 [[services]]
 binding = "AUTH_BACKEND_STATELESS"
 service = "better-auth-cloudflare-hono-do-stateless"
+
+[[services]]
+binding = "AUTH_BACKEND_D1_UNIQUE"
+service = "better-auth-cloudflare-hono-do-d1-unique"

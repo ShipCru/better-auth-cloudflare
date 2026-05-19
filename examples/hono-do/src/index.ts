@@ -60,7 +60,16 @@ app.use(
 
 app.use("*", async (c, next) => {
     const cf = (c.req.raw as unknown as { cf?: unknown }).cf ?? {};
-    const auth = createAuth(c.env, cf as Parameters<typeof createAuth>[1], new URL(c.req.url).origin);
+    // Pass the Hono execution context's waitUntil so the DO adapter can
+    // defer non-critical writes (identity cache, thick cache) past the
+    // response. Saves ~50-200ms on signup p50.
+    const deferredWritesCtx = { waitUntil: (p: Promise<unknown>) => c.executionCtx.waitUntil(p) };
+    const auth = createAuth(
+        c.env,
+        cf as Parameters<typeof createAuth>[1],
+        new URL(c.req.url).origin,
+        deferredWritesCtx
+    );
     c.set("auth", auth);
     await next();
 });

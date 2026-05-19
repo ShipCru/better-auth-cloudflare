@@ -1,6 +1,11 @@
 import type { IncomingRequestCfProperties } from "@cloudflare/workers-types";
 import { betterAuth } from "better-auth";
-import { withCloudflare, d1AuthDataStore, createIdentityIndexCache } from "better-auth-cloudflare";
+import {
+    withCloudflare,
+    d1AuthDataStore,
+    createIdentityIndexCache,
+    createD1IdentityStore,
+} from "better-auth-cloudflare";
 import { anonymous } from "better-auth/plugins";
 import type { CloudflareBindings } from "../env";
 import { pickPasswordConfig } from "./password-config";
@@ -15,7 +20,18 @@ import { pickPasswordConfig } from "./password-config";
  * No D1/Hyperdrive needed. Hot path is signature verify + zero-to-two DO
  * RPCs depending on the flow.
  */
-function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, baseURL?: string) {
+function createAuth(
+    env?: CloudflareBindings,
+    cf?: IncomingRequestCfProperties,
+    baseURL?: string,
+    /**
+     * Per-request ExecutionContext. When provided, the adapter dispatches
+     * non-critical writes (identity-cache upsert, thick-cache fan-out) via
+     * `ctx.waitUntil` so they don't block the user response. The Hono
+     * middleware passes this in.
+     */
+    deferredWritesCtx?: { waitUntil(p: Promise<unknown>): void }
+) {
     // Sessions in this v1 of the DO adapter go to BA's secondaryStorage (KV),
     // not to the DO. We disable `geolocationTracking` here (which would force
     // sessions into the DB-backed path) — the `cloudflare/geolocation`
@@ -62,6 +78,15 @@ function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, 
                       // (~200-300ms even for 1-row results). Compatible with
                       // thickIdentity — the thick path wins when both set.
                       bundleUserAccounts: env.USE_BUNDLE_RPC === "1",
+                      // Per-request waitUntil sink so non-critical writes
+                      // (identity cache, thick cache) don't block the
+                      // signup response. Saves ~50-200ms p50.
+                      deferredWritesCtx,
+                      // D1 UNIQUE store replaces IdentityDO for email
+                      // uniqueness. One D1 INSERT vs reserve+commit on a
+                      // cold DO. Required: AUTH_DB binding + schema applied.
+                      d1IdentityStore:
+                          env.USE_D1_IDENTITY === "1" && env.AUTH_DB ? createD1IdentityStore(env.AUTH_DB) : undefined,
                   }
                 : undefined,
             // When USE_STATELESS_SESSION=1 we don't pass KV to

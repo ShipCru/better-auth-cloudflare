@@ -37,6 +37,7 @@ const VARIANT_TO_BINDING: Record<string, string> = {
     stacked: "AUTH_BACKEND_STACKED",
     recommended: "AUTH_BACKEND_RECOMMENDED",
     stateless: "AUTH_BACKEND_STATELESS",
+    "d1-unique": "AUTH_BACKEND_D1_UNIQUE",
 };
 
 const app = new Hono<{ Bindings: Env }>();

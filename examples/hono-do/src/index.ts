@@ -11,6 +11,23 @@ type Variables = { auth: ReturnType<typeof createAuth> };
 
 const app = new Hono<{ Bindings: CloudflareBindings; Variables: Variables }>();
 
+// Note on compression: Cloudflare's edge automatically compresses responses
+// based on the client's Accept-Encoding header (brotli > gzip). We do NOT
+// run server-side compression here — Hono's compress() would compress
+// unconditionally and break clients that don't advertise Accept-Encoding.
+
+// Cache headers per route family. Cloudflare honors these at the edge.
+//   /api/auth/*  → no-store (auth state must never be cached)
+//   /admin/*     → private, max-age=10 (~aligns with the recovery sync window)
+app.use("/api/auth/*", async (c, next) => {
+    await next();
+    c.res.headers.set("Cache-Control", "private, no-store, max-age=0");
+});
+app.use("/admin/*", async (c, next) => {
+    await next();
+    c.res.headers.set("Cache-Control", "private, max-age=10");
+});
+
 app.use(
     "/api/auth/**",
     cors({
@@ -43,6 +60,42 @@ app.get("/protected", async c => {
 });
 
 app.get("/health", c => c.json({ status: "ok" }));
+
+/**
+ * Debug-only metrics endpoint. Returns the analytics dataset binding
+ * status plus a sample SQL query for the Cloudflare Analytics Engine
+ * API. AE doesn't expose a runtime SQL API from inside Workers — queries
+ * must go through the account-level GraphQL/SQL API. Gate this behind
+ * admin auth + IP allowlist for production.
+ */
+app.get("/debug/metrics", async c => {
+    const ae = c.env.AUTH_ANALYTICS;
+    if (!ae) {
+        return c.json(
+            {
+                error: "AUTH_ANALYTICS not bound",
+                note: "Bind an Analytics Engine dataset in wrangler.toml to enable.",
+            },
+            503
+        );
+    }
+    return c.json({
+        bindingPresent: true,
+        sampleQuery: `
+            SELECT blob1 AS operation,
+                   quantileExact(0.50)(double1) AS p50_ms,
+                   quantileExact(0.95)(double1) AS p95_ms,
+                   quantileExact(0.99)(double1) AS p99_ms,
+                   count() AS n
+            FROM ba_cf_do_events
+            WHERE timestamp > NOW() - INTERVAL '1' HOUR
+              AND double2 = 1
+            GROUP BY blob1
+            ORDER BY n DESC
+        `.trim(),
+        runVia: "https://api.cloudflare.com/client/v4/accounts/{account_id}/analytics_engine/sql",
+    });
+});
 
 /**
  * Admin/dashboard read endpoint. Reads users straight from the D1 recovery

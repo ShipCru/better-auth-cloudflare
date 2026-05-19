@@ -139,15 +139,33 @@ export async function runScenario({ env, scenarioId, variantId, n, cf }: RunScen
             n: durations.length,
             ok,
             error,
-            colo: (cf.colo as string | undefined) ?? null,
-            country: (cf.country as string | undefined) ?? null,
-            continent: (cf.continent as string | undefined) ?? null,
-            region: (cf.region as string | undefined) ?? null,
+            geo: extractGeo(cf),
             ts: new Date().toISOString(),
             durations,
             durationsLabels,
             ...stats(durations),
         },
+    };
+}
+
+function extractGeo(cf: Record<string, unknown>) {
+    const s = (k: string): string | null => (typeof cf[k] === "string" ? (cf[k] as string) : null);
+    const n = (k: string): number | null => (typeof cf[k] === "number" ? (cf[k] as number) : null);
+    return {
+        colo: s("colo"),
+        country: s("country"),
+        continent: s("continent"),
+        region: s("region"),
+        regionCode: s("regionCode"),
+        city: s("city"),
+        postalCode: s("postalCode"),
+        timezone: s("timezone"),
+        latitude: s("latitude"),
+        longitude: s("longitude"),
+        asn: n("asn"),
+        asOrganization: s("asOrganization"),
+        tlsVersion: s("tlsVersion"),
+        tlsCipher: s("tlsCipher"),
     };
 }
 

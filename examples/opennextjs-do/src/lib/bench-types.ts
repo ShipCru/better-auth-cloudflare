@@ -47,9 +47,9 @@ export const BACKEND_VARIANTS = [
     {
         id: "fast-hash",
         binding: "AUTH_BACKEND_FAST_HASH",
-        label: "Faster password hash preset (not yet deployed)",
+        label: "Faster password hash preset (scrypt N=4096) — live",
         description:
-            "Current architecture + scrypt(N=4096) instead of N=16384. Expected: -1 to -3s of CPU on signup/signin.",
+            "Sibling deploy with scrypt(N=4096, r=8) instead of BA's default (N=16384, r=16). Targets the ~150-250ms scrypt slice of warm signin/signup. Hash format is incompatible with the default — users created here can only sign in here.",
     },
 ] as const;
 
@@ -137,10 +137,8 @@ export interface BenchScenarioResult {
     n: number;
     ok: number;
     error: number;
-    colo: string | null;
-    country: string | null;
-    continent: string | null;
-    region: string | null;
+    /** Full Cloudflare geo block — see BenchGeo below for the field list. */
+    geo: BenchGeo;
     ts: string;
     /** Per-iteration wall-clock millis, in order. Used to plot cold→warm curves. */
     durations: number[];
@@ -152,6 +150,30 @@ export interface BenchScenarioResult {
     p50: number;
     p95: number;
     p99: number;
+}
+
+/**
+ * Slice of the Cloudflare `request.cf` block we surface in bench
+ * results. Captures both where the user hit the edge (colo/country/etc.)
+ * and the network-level signals useful for the auth use-cases below.
+ */
+export interface BenchGeo {
+    colo: string | null;
+    country: string | null;
+    continent: string | null;
+    region: string | null;
+    regionCode: string | null;
+    city: string | null;
+    postalCode: string | null;
+    timezone: string | null;
+    latitude: string | null;
+    longitude: string | null;
+    /** Autonomous System Number (network operator). */
+    asn: number | null;
+    asOrganization: string | null;
+    /** TLS version + cipher — handy for fingerprinting in auth contexts. */
+    tlsVersion: string | null;
+    tlsCipher: string | null;
 }
 
 export interface BenchRunRequest {

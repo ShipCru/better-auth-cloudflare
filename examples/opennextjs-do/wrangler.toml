@@ -30,3 +30,10 @@ service = "better-auth-cloudflare-hono-do"
 [[services]]
 binding = "AUTH_BACKEND_THICK_ID"
 service = "better-auth-cloudflare-hono-do-thick"
+
+# Sibling auth Worker with scrypt(N=4096) instead of BA's default
+# (N=16384). Deployed from the same source via `wrangler deploy --env
+# fast_hash`. Targets the ~200ms scrypt CPU slice of warm signin.
+[[services]]
+binding = "AUTH_BACKEND_FAST_HASH"
+service = "better-auth-cloudflare-hono-do-fast-hash"

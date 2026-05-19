@@ -15,4 +15,6 @@ export interface CloudflareBindings {
     GOOGLE_CLIENT_SECRET?: string;
     /** "1" enables the thick IdentityDO sign-in fast path. Set per wrangler env. */
     USE_THICK_IDENTITY?: string;
+    /** "1" swaps BA's scrypt default for the faster preset. See auth/fast-hash.ts. */
+    USE_FAST_HASH?: string;
 }

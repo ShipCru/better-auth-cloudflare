@@ -3,6 +3,7 @@ import { betterAuth } from "better-auth";
 import { withCloudflare, d1AuthDataStore } from "better-auth-cloudflare";
 import { anonymous } from "better-auth/plugins";
 import type { CloudflareBindings } from "../env";
+import * as fastHash from "./fast-hash";
 
 /**
  * Single auth factory wired to the Durable Object adapter.
@@ -62,6 +63,12 @@ function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, 
                         `(in production, email this to the user)`
                     );
                 },
+                // Opt-in faster password hash preset. USE_FAST_HASH=1 swaps
+                // BA's default scrypt(N=16384, r=16) for scrypt(N=4096, r=8)
+                // — drops ~150-250ms of CPU per hash. See ./fast-hash.ts.
+                // Users created under the fast preset can ONLY sign in
+                // under the fast preset (verify checks the hash prefix).
+                password: env?.USE_FAST_HASH === "1" ? { hash: fastHash.hash, verify: fastHash.verify } : undefined,
             },
             // Social providers. Wired conditionally — only enabled if env
             // credentials are present. Set GOOGLE_CLIENT_ID and

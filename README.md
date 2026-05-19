@@ -113,6 +113,20 @@ Demo implementations are available in the [`examples/`](./examples/) directory f
 - [ ] **Drift detection** — daily job that diffs `wrangler.toml` declared bindings vs `wrangler deployments list` actual state. Surfaces "production has secrets/bindings that no longer match the repo" before it becomes an incident.
 - [ ] **Database schema sync in CI** — for D1, on push run `wrangler d1 execute --remote --file auth-data-schema.sql` against the recovery DB. Detects schema drift, fails the build if migrations would be data-destructive.
 
+**Geo + abuse / rate-limiting hardening:**
+
+> Cloudflare gives us a lot of geo + network signal for free on every request (`cf.colo`, `cf.country`, `cf.city`, `cf.asn`, `cf.tlsVersion`, etc.). The bench API and UI now surface all of it. Below are the concrete auth uses we want to wire.
+
+- [x] **Surface full geo + network metadata in bench results** _(ShipCru fork)_ — `colo`, `country`, `continent`, `region`, `regionCode`, `city`, `postalCode`, `timezone`, `lat/lng`, `asn`, `asOrganization`, `tlsVersion`, `tlsCipher`. Visible in the `/bench` UI under "geo + network metadata".
+- [x] **IP rate limiting** _(via BA core)_ — `rateLimit.enabled = true` with `customRules` for `/sign-in/email`, `/sign-up/email`, `/forget-password`. BA keys by IP using the configured `ipAddressHeaders` (we set `cf-connecting-ip` first). See `examples/hono-do/src/auth/index.ts`.
+- [ ] **Per-account rate limit** — N failed signin attempts within a window → temporary account lockout. Currently only per-IP, so an attacker can rotate IPs. Lock the account itself (UserDO state) after 5 failures in 15 min, surface a meaningful error.
+- [ ] **Captcha after N failures** — turnstile or hcaptcha challenge after the per-IP or per-account rate-limit window expires. Don't block signin entirely; force a humanity check.
+- [ ] **Anomalous geo email** — on first signin from a "new" country (country not seen in `session.country` history), send a "new sign-in from $city, $country" email. Stores per-principal country set in the UserDO; new-country event triggers the email.
+- [ ] **Country / ASN allow/deny list** — `auth.config.allowedCountries` / `deniedAsns` config. Reject sign-in / sign-up requests from disallowed regions or known-bad ASNs (datacenter ranges if you don't want bot signups). Pulls from `cf.country` and `cf.asn`.
+- [ ] **TLS fingerprint anomaly detection** — log `cf.tlsClientCiphersSha1` + `cf.tlsClientExtensionsSha1` per session. Surface in admin dashboard. Sudden cipher-suite change for an established session is a strong account-takeover signal.
+- [ ] **Geo-aware UX** — return `cf.country` to the client at signup so the form can default to local language / currency / TOS jurisdiction.
+- [ ] **Residency routing by geo** — pair with the multi-region D1 work above. `cf.continent` picks which regional D1 to write to so EU users' principals live in EU D1. Hard-stop residency boundary.
+
 **Collaborative editing primitives (Glass / ShipCru-specific):**
 
 - [ ] **ResumeDurableObject** with WebSocket Hibernation API (`ctx.acceptWebSocket`). One DO per resume, holds canonical document, broadcasts edits to all connected sessions, hibernates when idle. Auth-gated via session cookie verification before `acceptWebSocket`. Op-log + periodic snapshot; CRDT-friendly (LWW or Yjs-compatible binary deltas).

@@ -38,6 +38,13 @@ function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, 
                       // Use restorePrincipal() to replay a
                       // principal back into a DO that lost storage.
                       authDataStore: env.AUTH_DB ? d1AuthDataStore(env.AUTH_DB) : undefined,
+                      // Opt-in to the "emailHash is the primary lookup"
+                      // architecture. When USE_THICK_IDENTITY=1 the adapter
+                      // mirrors principal+account data into IdentityDO's
+                      // thick_cache so sign-in is one DO RPC instead of three.
+                      // Set per-env in wrangler.toml [env.thick.vars] for a
+                      // sibling deploy that can be A/B'd against current.
+                      thickIdentity: env.USE_THICK_IDENTITY === "1",
                   }
                 : undefined,
             kv: env?.KV,

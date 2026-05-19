@@ -56,6 +56,21 @@ export interface DOAdapterConfig {
      * details and the schema in `AUTH_DATA_D1_SCHEMA`.
      */
     authDataStore?: AuthDataStore;
+    /**
+     * Opt-in: write user + account snapshots into IdentityDO's `thick_cache`
+     * on every signup/account/profile change, and read sign-in's
+     * `findOne(user, email, join.account)` from there in ONE DO RPC instead
+     * of bouncing IdentityDO → UserDO.findPrincipal → UserDO.listAccounts.
+     *
+     * Trade-off: write fan-out (every account write also touches the
+     * IdentityDO) and eventual consistency between the two DOs for ~ms-scale
+     * windows. The thick cache is a denormalised read cache; the canonical
+     * source of truth for principal data remains UserDO.
+     *
+     * Useful when sign-in is the hot path. For signup-heavy workloads the
+     * write amplification may not be worth it.
+     */
+    thickIdentity?: boolean;
 }
 
 export interface RegionContext {
@@ -106,6 +121,29 @@ async function hashEmail(email: string): Promise<string> {
     let out = "";
     for (const b of bytes) out += b.toString(16).padStart(2, "0");
     return out;
+}
+
+/**
+ * Thick mode write helper. Pulls the canonical principal + account list
+ * from UserDO and writes a JSON snapshot into IdentityDO's thick_cache so
+ * the next sign-in resolves in one DO RPC. Best-effort: if anything fails
+ * we log and continue; the legacy three-RPC path remains correct.
+ */
+async function updateThickCache(config: DOAdapterConfig, log: Logger, principalId: string): Promise<void> {
+    try {
+        const userStub = config.userDo.get(config.userDo.idFromName(principalId));
+        // @ts-expect-error — DO RPC
+        const principal = (await userStub.findPrincipal()) as { email?: string | null; isAnonymous?: boolean } | null;
+        if (!principal?.email || principal.isAnonymous) return;
+        // @ts-expect-error — DO RPC
+        const accounts = (await userStub.listAccounts(principalId)) as unknown[];
+        const emailHash = await hashEmail(principal.email);
+        const idStub = config.identityDo.get(config.identityDo.idFromName(`identity:${emailHash}`));
+        // @ts-expect-error — DO RPC
+        await idStub.upsertCachedData(emailHash, JSON.stringify(principal), JSON.stringify(accounts));
+    } catch (err) {
+        log.warn("thick cache update failed", { principalId, err: (err as Error)?.message });
+    }
 }
 
 function pickWhere(where: WhereClause[], field: string): unknown {
@@ -208,6 +246,14 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                             });
                             const mapped = mapAccountToBA(account);
                             rememberFresh("account", account.id, mapped);
+                            // Thick mode: keep IdentityDO's thick_cache in sync with
+                            // the account write. This lets sign-in resolve in one DO
+                            // RPC instead of three. Fetches the principal + full
+                            // account list from UserDO once so the snapshot includes
+                            // everything BA's signin path needs.
+                            if (config.thickIdentity) {
+                                await updateThickCache(config, log, userId);
+                            }
                             return mapped as never;
                         }
                         unsupported("create", model, "use BA secondaryStorage for session/verification");
@@ -271,6 +317,41 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                                 }
                                 const emailHash = await hashEmail(email);
                                 const idStub = identityStub(emailHash);
+
+                                // Thick mode fast path. ONE DO RPC returns
+                                // principal_id + user + accounts. Falls back to
+                                // the legacy three-RPC path if the thick cache
+                                // wasn't populated (e.g., user predates the
+                                // thickIdentity flag being turned on).
+                                if (config.thickIdentity) {
+                                    // @ts-expect-error
+                                    const thick = (await idStub.signInLookup(emailHash)) as {
+                                        principalId: string;
+                                        principal: string | null;
+                                        accounts: string | null;
+                                    } | null;
+                                    if (!thick) return null;
+                                    if (thick.principal && thick.accounts) {
+                                        log.info("findOne.email.thick_hit", {});
+                                        const principal = JSON.parse(thick.principal) as PrincipalRecord;
+                                        const accounts = JSON.parse(thick.accounts) as AccountRecord[];
+                                        const baUser = mapPrincipalToBA(principal);
+                                        (baUser as Record<string, unknown>).account = accounts.map(mapAccountToBA);
+                                        return baUser as never;
+                                    }
+                                    log.info("findOne.email.thick_miss", { principalId: thick.principalId });
+                                    // Fall through to legacy fetch from UserDO.
+                                    const stub = userStub(thick.principalId);
+                                    // @ts-expect-error
+                                    const p = (await stub.findPrincipal()) as PrincipalRecord | null;
+                                    if (!p) return null;
+                                    const baUser = mapPrincipalToBA(p);
+                                    // @ts-expect-error
+                                    const accounts = (await stub.listAccounts(p.id)) as AccountRecord[];
+                                    (baUser as Record<string, unknown>).account = accounts.map(mapAccountToBA);
+                                    return baUser as never;
+                                }
+
                                 // @ts-expect-error
                                 const lookup = (await idStub.lookup(emailHash)) as { principalId: string } | null;
                                 if (!lookup) return null;
@@ -374,6 +455,7 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                                 emailVerified: update.emailVerified as boolean | undefined,
                                 image: update.image as string | undefined,
                             })) as PrincipalRecord;
+                            if (config.thickIdentity) await updateThickCache(config, log, id);
                             return mapPrincipalToBA(p) as never;
                         }
 
@@ -390,6 +472,7 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                                 update as Partial<AccountRecord>,
                                 userId
                             )) as AccountRecord | null;
+                            if (config.thickIdentity) await updateThickCache(config, log, userId);
                             return a ? (mapAccountToBA(a) as never) : null;
                         }
 

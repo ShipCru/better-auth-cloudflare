@@ -22,3 +22,11 @@ enabled = true
 [[services]]
 binding = "AUTH_BACKEND"
 service = "better-auth-cloudflare-hono-do"
+
+# Sibling auth Worker that opts into the IdentityDO thick_cache fast path.
+# Deployed from the same source as AUTH_BACKEND via `wrangler deploy --env
+# thick`. The bench page exposes both as `current` and `thick-identity`
+# variants for live A/B.
+[[services]]
+binding = "AUTH_BACKEND_THICK_ID"
+service = "better-auth-cloudflare-hono-do-thick"

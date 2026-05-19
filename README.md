@@ -203,76 +203,161 @@ Demo implementations are available in the [`examples/`](./examples/) directory f
 
 ## Benchmark results (multi-region)
 
-n=30 per region per op, 2026-05-19, D1 primary in `enam` with read-replication off. All times in ms (p50). Lower is better.
+n=30 per region per op, 2026-05-19, D1 primary in `enam` with **read replication = `auto`**. All times in ms (p50). Lower is better.
 
-**Signup p50 (ms)**
+### Signup p50 (ms) — cold path, fresh email each iteration
 
-| variant                                     |    wnam |    enam |     sam |    weur |    eeur |    apac |       oc |      me |     afr |
-| ------------------------------------------- | ------: | ------: | ------: | ------: | ------: | ------: | -------: | ------: | ------: |
-| current (baseline)                          |    2145 |    1857 |    1771 |    1398 |    1728 |    3154 |     3506 |    1680 |    1476 |
-| thick-identity                              |    2142 |    1939 |    1873 |    1377 |    1840 |    3212 |     3446 |    1826 |    1466 |
-| fast-hash (scrypt N=4096)                   |    1849 |    1743 |    1603 |    1179 |    1640 |    3092 |     3325 |    1677 |    1221 |
-| pbkdf2-fast                                 |    1956 |    1788 |    1620 |    1207 |    1668 |    3086 |     3370 |    1676 |    1185 |
-| kv-cache                                    |    2145 |    1993 |    1911 |    1379 |    1849 |    3169 |     3418 |    1684 |    1454 |
-| stacked (fast-hash + kv-cache)              |    1877 |    1723 |    1600 |    1204 |    1578 |    3094 |     3315 |    1621 |    1243 |
-| recommended (pbkdf2 + pepper + kv + bundle) |    1876 |    1767 |    1601 |    1146 |    1575 |    3113 |     3347 |    1525 |    1203 |
-| stateless (recommended − KV session)        |    1319 |    1284 |    1173 |    1125 |    1429 |    1608 |     1715 |    1452 |    1114 |
-| d1-unique                                   |    1350 |    1219 |    1156 |     801 |    1101 |    2466 |     2747 |    1054 |     847 |
-| **d1-unique-stateless**                     | **733** | **762** | **636** | **733** | **945** | **983** | **1054** | **868** | **744** |
+| variant                                     |    wnam |    enam |     sam |    weur |    eeur |     apac |       oc |      me |     afr |
+| ------------------------------------------- | ------: | ------: | ------: | ------: | ------: | -------: | -------: | ------: | ------: |
+| current (baseline)                          |    2003 |    1776 |    1768 |    1192 |    1636 |     3230 |     3570 |    1523 |    1278 |
+| thick-identity                              |    2022 |    1880 |    1881 |    1221 |    1670 |     3235 |     3596 |    1467 |    1273 |
+| fast-hash (scrypt N=4096)                   |    1805 |    1725 |    1644 |    1122 |    1528 |     3181 |     3358 |    1361 |    1126 |
+| pbkdf2-fast                                 |    1807 |    1631 |    1517 |    1096 |    1596 |     3075 |     3365 |    1354 |    1103 |
+| kv-cache                                    |    2018 |    1841 |    1811 |    1218 |    1722 |     3167 |     3582 |    1480 |    1282 |
+| stacked (fast-hash + kv-cache)              |    1821 |    1682 |    1561 |    1121 |    1509 |     3064 |     3303 |    1409 |    1123 |
+| recommended (pbkdf2 + pepper + kv + bundle) |    1775 |    1646 |    1582 |    1060 |    1469 |     3126 |     3352 |    1341 |    1102 |
+| stateless (recommended − KV session)        |    1216 |    1200 |    1098 |    1024 |    1355 |     1624 |     1727 |    1166 |    1033 |
+| d1-unique                                   |    1304 |    1163 |    1080 |     740 |     988 |     2514 |     2848 |     910 |     745 |
+| **d1-unique-stateless**                     | **752** | **654** | **555** | **668** | **832** | **1007** | **1219** | **758** | **662** |
 
-**Signin p50 (ms)**, warm same-user
+### Signin p50 (ms) — warm path, same user repeated
 
-| variant                 |   wnam |    enam |     sam |    weur |    eeur |    apac |      oc |      me |     afr |
-| ----------------------- | -----: | ------: | ------: | ------: | ------: | ------: | ------: | ------: | ------: |
-| current (baseline)      |    734 |     590 |     612 |     326 |     378 |    1377 |    1580 |     429 |     214 |
-| thick-identity          |    706 |     582 |     559 |     151 |     282 |    1334 |    1547 |     293 |     191 |
-| fast-hash               |    510 |     423 |     430 |     137 |     203 |    1237 |    1421 |     275 |     138 |
-| pbkdf2-fast             |    502 |     423 |     416 |     117 |     225 |    1224 |    1416 |     387 |     139 |
-| kv-cache                |    750 |     611 |     587 |     148 |     351 |    1372 |    1490 |     359 |     194 |
-| stacked                 |    521 |     493 |     458 |      95 |     195 |    1226 |    1339 |     191 |     148 |
-| recommended             |    513 |     440 |     411 |      83 |     170 |    1220 |    1387 |     152 |      86 |
-| stateless               |     24 |      33 |      21 |      19 |      26 |      21 |      12 |      35 |      22 |
-| d1-unique               |    589 |     472 |     407 |     188 |     314 |    1396 |    1537 |     348 |     233 |
-| **d1-unique-stateless** | **60** | **136** | **109** | **185** | **212** | **148** | **227** | **214** | **202** |
+| variant                 |   wnam |   enam |    sam |   weur |   eeur |   apac |     oc |     me |    afr |
+| ----------------------- | -----: | -----: | -----: | -----: | -----: | -----: | -----: | -----: | -----: |
+| current (baseline)      |    620 |    615 |    654 |    144 |    258 |   1395 |   1582 |    249 |    167 |
+| thick-identity          |    625 |    565 |    621 |    131 |    269 |   1369 |   1592 |    230 |    123 |
+| fast-hash               |    450 |    446 |    427 |     96 |    196 |   1253 |   1429 |    188 |    108 |
+| pbkdf2-fast             |    461 |    452 |    431 |     75 |    256 |   1247 |   1441 |    196 |     98 |
+| kv-cache                |    620 |    590 |    615 |    172 |    276 |   1351 |   1558 |    233 |    148 |
+| stacked                 |    491 |    448 |    420 |     90 |    180 |   1250 |   1347 |    134 |     83 |
+| recommended             |    468 |    412 |    406 |     67 |    157 |   1227 |   1411 |    166 |     83 |
+| **stateless**           | **15** | **32** | **19** | **14** | **66** | **13** | **39** | **25** | **17** |
+| d1-unique               |    463 |    469 |    422 |    103 |    187 |   1231 |   1454 |    171 |    111 |
+| **d1-unique-stateless** |     22 |     62 |     24 |     25 | **46** |     40 |     85 |     29 |     43 |
 
-**Winner across both ops: `d1-unique-stateless`.** Signup sub-1s p50 in 6/9 regions (worst: 1054 ms OC, −70% vs current); signin sub-230 ms global (−84% vs current). `stateless` is faster on signin alone (sub-40 ms — pure cookie verify) because it skips the email-lookup; if you don't need new signups going through D1, `stateless` is the pick.
+### DB vs DO for the typical hot path
 
-The `d1-unique-stateless` combo wins because the only cross-region cost on its signup path is the D1 `INSERT` to the `enam` primary, and signin reads the same primary via Sessions API. Dropping BA's `secondaryStorage` KV PUT removes the second cross-region hop that hurt the `d1-unique` baseline in APAC.
+In one paragraph: **DO is fractionally faster on warm signin (15-66 ms vs 22-85 ms for the stateless pair, ~20-50 ms gap); D1 is dramatically faster on signup (-40% to -68% everywhere)**. Both stateless variants beat every legacy variant on signin by an order of magnitude because they skip the KV session write. The difference between them on signin is the lookup: `stateless` reads from IdentityDO; `d1-unique-stateless` reads from D1 via Sessions API.
 
-Source JSONs in `/tmp/bench-signup-n30.json`, `/tmp/bench-signin-n30.json`, `/tmp/bench-signup-enam-*.json`, `/tmp/bench-signin-fixed-*.json`. Re-run with `examples/probe-worker` `POST /probe { variantId, op, n }`.
+Direct head-to-head, signup (cold path):
+
+| region | `recommended` (IdentityDO) | `d1-unique-stateless` (D1) |   DO − D1 |
+| ------ | -------------------------: | -------------------------: | --------: |
+| wnam   |                       1775 |                        752 | **+1023** |
+| enam   |                       1646 |                        654 |  **+992** |
+| sam    |                       1582 |                        555 | **+1027** |
+| weur   |                       1060 |                        668 |  **+392** |
+| eeur   |                       1469 |                        832 |  **+637** |
+| apac   |                       3126 |                       1007 | **+2119** |
+| oc     |                       3352 |                       1219 | **+2133** |
+| me     |                       1341 |                        758 |  **+583** |
+| afr    |                       1102 |                        662 |  **+440** |
+
+Direct head-to-head, signin (warm hot path):
+
+| region | `stateless` (IdentityDO) | `d1-unique-stateless` (D1 + replicas) | DO − D1 |
+| ------ | -----------------------: | ------------------------------------: | ------: |
+| wnam   |                       15 |                                    22 |      −7 |
+| enam   |                       32 |                                    62 |     −30 |
+| sam    |                       19 |                                    24 |      −5 |
+| weur   |                       14 |                                    25 |     −11 |
+| eeur   |                       66 |                                    46 | **+20** |
+| apac   |                       13 |                                    40 |     −27 |
+| oc     |                       39 |                                    85 |     −46 |
+| me     |                       25 |                                    29 |      −4 |
+| afr    |                       17 |                                    43 |     −26 |
+
+**Recommendation.** The 20-50 ms DO advantage on signin is below most human-perception thresholds. The 400-2000 ms D1 advantage on signup is very perceptible (an instant signup vs a hesitation). For a typical 1:10:100 (signup:signin:get-session) workload `get-session` skips both subsystems entirely (pure cookie verify), so the choice doesn't affect that path. Net: **D1-unique + stateless is the right default**, especially under the multi-region jurisdiction plan, where regional D1 replicas keep signin sub-100 ms anywhere.
+
+The single counter-argument for IdentityDO: it survives the D1 primary region failing (each DO is independently placed). For DR scenarios that's real value. The current setup already keeps `users` + `accounts` in UserDOs, so the worst case for the d1-unique path on D1 outage is "identity lookups fail fast" — no data loss, signup is unavailable until D1 recovers.
+
+### How the bench was run
+
+`POST /probe { variantId, op, n }` against `examples/probe-worker`, which fans out to `ProbeDurableObject`s pinned via `locationHint` in nine CF regions. Each region runs `n` sequential calls against the variant's service binding. Sources: `/tmp/bench-h2h-*-{signup,signin}.json`. Re-run via `/tmp/bench-headtohead.sh`.
 
 ## Multi-region D1 + jurisdiction routing plan
 
-**Current state.** A single D1 (`ba-cf-do-recovery`) holds three tables:
+**Priority order.** `enam` first (done — D1 primary moved, read replication on `auto`), `weur` next for EU residency, then sharding inside each jurisdiction.
 
-| table                | role                                                                             | source-of-truth?                                         |
-| -------------------- | -------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| `identity_unique`    | `email_hash → principal_id`, UNIQUE constraint backs the `d1-unique` signup path | **yes** (when `USE_D1_IDENTITY=1`)                       |
-| `identity_index`     | KV+D1 cache for `email → principal_id`; version-stamped                          | no (cache; `identity_unique` or IdentityDO is the floor) |
-| `users` + `accounts` | DR mirror written one-way from UserDO via the outbox                             | no (DOs are the source of truth)                         |
+**Current state.** A single D1 (`ba-cf-do-recovery-enam`, primary in `enam`, **read replication enabled — `mode: auto`**) holds three tables:
 
-Two of those three (`identity_unique`, `users`) hold per-principal PII (email, name, image). That's what makes residency a hard requirement — putting EU users' rows in a US D1 violates GDPR.
+| table                | role                                                                             | source-of-truth?                                         | contains PII?                |
+| -------------------- | -------------------------------------------------------------------------------- | -------------------------------------------------------- | ---------------------------- |
+| `identity_unique`    | `email_hash → principal_id`, UNIQUE constraint backs the `d1-unique` signup path | **yes** (when `USE_D1_IDENTITY=1`)                       | only the email hash          |
+| `identity_index`     | KV+D1 cache for `email → principal_id`; version-stamped                          | no (cache; `identity_unique` or IdentityDO is the floor) | only the email hash          |
+| `users` + `accounts` | DR mirror written one-way from UserDO via the outbox                             | no (DOs are the source of truth)                         | **yes** (email, name, image) |
 
-**Phase 1 — move primary to enam (this PR).** A single D1 primary in `enam`. NA traffic is fast (same continent), EU traffic is fast-ish (one ocean hop). Replaces today's `wnam`-ish placement. No app changes — just `wrangler d1 create --location enam` and rebind. Validated by bench delta on `weur` and `enam` rows.
+Of those three, `users` + `accounts` carry the PII that matters for GDPR-style residency.
 
-**Phase 2 — EU primary + per-principal `home_region`.** Add a second D1 (`ba-cf-do-recovery-eu`) with the same schema, primary in `weur`. Introduce:
+### Phase 1 — enam primary + replicas (this PR)
 
-- A jurisdiction config: `{ enam: { d1: AUTH_DB_NA }, weur: { d1: AUTH_DB_EU } }`.
-- A `home_region` field on each principal, decided at signup from `cf.continent` (with an explicit user override for legal residency). Stored in the UserDO's principal record + mirrored to D1.
-- A routing layer that, given an email, has to find `principal_id` _and_ `home_region` together. Two options:
-    1. **Replicated identity index in KV** — single KV namespace (KV is global anyway) keyed by `email_hash` holds `{principalId, homeRegion, version}`. Lookup is one KV GET. PII is just the email hash. Falls back to fan-out (parallel `lookup` against every regional D1) on KV miss.
-    2. **Identity lookup in a tiny global D1** — only `identity_unique` lives in a global D1 (primary anywhere — wnam is fine); the heavy PII tables (`users`, `accounts`) live in the regional D1 picked by `home_region`. Heavier than KV but gives a strict-consistent uniqueness check.
-- A new `multiRegionAdapter(config)` factory that wraps the existing `createDoAdapter` and dispatches reads/writes to the correct regional `d1IdentityStore` + downstream `authDataStore`.
+Single D1 in `enam`, read replication `auto`. Sessions API (`db.withSession("first-unconstrained")`) is wired on every read path through `d1-identity` and `identity-cache`, so signin lookups serve from the nearest replica without code changes.
 
-**Phase 3 — APAC primary if traffic justifies it.** Same pattern, `ba-cf-do-recovery-apac` in `apac`. The bench shows APAC's signup tax against an enam primary is ~250 ms — only worth a third primary if APAC becomes a top-3 traffic region.
+### Phase 2 — EU primary + per-principal `home_jurisdiction`
 
-**Phase 4 — sharding inside a region.** When any one regional D1 nears the 10 GB ceiling, shard on `hash(principal_id) % N` across N sibling DBs in the same jurisdiction. The routing layer composes naturally — `(homeRegion, shardId)` becomes the routing key.
+Add a second D1 (`ba-cf-do-recovery-weur`) with the same schema, primary in `weur`. Plus:
 
-**Open questions deliberately deferred:**
+- **Jurisdiction config.** `{ na: { d1: AUTH_DB_NA, kv: KV_NA }, eu: { d1: AUTH_DB_EU, kv: KV_EU } }`. Each jurisdiction gets its own DO namespace, KV, and D1 — bindings declared per env block in `wrangler.toml`.
+- **`home_jurisdiction` on every principal.** Decided at signup from `cf.continent` (EU/NA), with an explicit user override for legal residency (a user in Tokyo who is legally EU-resident picks `eu`). Stored on the UserDO + mirrored to D1.
+- **Global identity directory in KV (replicated).** A single KV namespace (KV is global anyway) keyed by `sha256(email)` holds `{ principalId, homeJurisdiction, homeShard, version }`. Lookup is one KV GET (~5-30 ms anywhere); per-principal value is small (~80 B). Falls back to fan-out (parallel `identity_unique` lookup against every jurisdictional D1) on KV miss. This is the routing oracle — given an email, anyone anywhere can find which jurisdiction owns that principal.
 
-- Cross-jurisdiction account move (EU user moves to US). Probably "create new principal, link old via account merge, deprecate old". No data crosses borders.
-- Replication for read-locality within a jurisdiction. D1 Sessions API already gives us nearest-replica reads inside a primary's region; the multi-region pattern above is about _write_ primary placement, not replicas.
-- Hyperdrive (Postgres) variant of the same pattern, for users who want a real DB.
+### Phase 3 — sharding inside a jurisdiction, one shard per region
+
+Once a jurisdiction's D1 hits the ~10 GB ceiling (or write QPS limits), shard. The ask is "one shard per region" — so EU jurisdiction could shard into `eu-weur`, `eu-eeur`, `eu-me` (each shard is its own D1 primary in that physical region).
+
+- **Shard key.** `home_shard = pickShard(jurisdiction, cf.continent, cf.country)` at signup. Stored on the principal alongside `home_jurisdiction`.
+- **Composite routing key.** `(jurisdiction, shard) → D1 binding`. Worker bindings declared per shard.
+- **Identity uniqueness stays per-jurisdiction.** Each jurisdiction has ONE small `identity_unique` D1 (the directory above) that all shards in that jurisdiction share. Shards only carry the heavy `users`+`accounts` tables. Avoids the cross-shard uniqueness coordination problem entirely.
+
+### Client propagation — how every API call routes correctly
+
+The hard part of multi-region isn't the data layout — it's making sure every subsequent client request lands on the right backend without the client knowing the topology.
+
+**Pattern: edge router worker + signed cookie**
+
+```
+            ┌──────────────────────────────────────────────────────┐
+            │ auth.example.com  (single domain, one CNAME)         │
+            │                                                      │
+            │   ┌────────────────────────────────────┐             │
+            │   │  Router Worker (the only public-   │             │
+            │   │   facing entry point)              │             │
+            │   │                                    │             │
+   ┌──── 1. │   │  Parse cookie 'session_data':      │             │
+   │ signed │   │    { principalId, jurisdiction,    │             │
+   │ cookie │   │      shard, ... }                  │             │
+   ├──── 2. │   │                                    │             │
+   │ no     │   │  No cookie? Pre-auth path:         │             │
+   │ cookie │   │   - signup → cf.continent → juris  │             │
+   │        │   │   - signin → KV identity directory │             │
+   │        │   │     by email_hash → juris+shard    │             │
+   │        │   │                                    │             │
+   │        │   │  fetch(env.AUTH[juris][shard], req)│  ← service  │
+   │        │   └────────────────────────────────────┘    bindings │
+   │                  │                                            │
+   │                  ├──► auth-na-shard-enam                      │
+   │                  ├──► auth-eu-shard-weur                      │
+   │                  └──► auth-eu-shard-eeur                      │
+            └──────────────────────────────────────────────────────┘
+```
+
+**Three propagation surfaces:**
+
+1. **Cookie (primary).** BA's signed `session_data` cookie is the natural carrier. Extend the principal payload to include `homeJurisdiction` and `homeShard`. Every authenticated request already sends this cookie. The router HMAC-verifies it (same secret BA uses) and routes without a network lookup. **This is how the client "propagates" the region without ever knowing about regions.**
+2. **KV identity directory (signin fallback).** When there's no cookie (first signin on a new device, post-signout signin, email-based recovery), the router needs to find the jurisdiction by email. One KV GET. Result is then baked into the response cookie so subsequent requests stay on the fast path.
+3. **`cf.continent` (last-resort signup).** Brand-new user with no cookie and no email→jurisdiction record. Best-guess from request geo. Override pathway available via an explicit `X-Auth-Jurisdiction` header from the client (e.g., a settings page where the user picks legal residency before signup).
+
+**Why edge-router over DNS geo-steering.** DNS-based routing (Cloudflare Load Balancer with geo rules) handles request-IP geography but can't enforce "this principal belongs to EU regardless of where they're signing in from today." A returning EU user on a Tokyo coffee-shop wifi must still land on the EU backend. The cookie is the authoritative carrier; geo is only a default for first-touch.
+
+**Why service bindings over public-domain hops.** Worker-to-Worker service bindings are in-isolate (no DNS, no TLS, no HTTP overhead) and stay inside Cloudflare's network. A router fanning out to 3–5 shards over service bindings adds ~1–2 ms; fanning out over public HTTPS would add ~20–50 ms. Strict residency: service bindings between Workers in the same Cloudflare account; no data crosses the public internet.
+
+**SDK story.** The client SDK doesn't need to know about jurisdictions or shards. The router is the only thing the SDK talks to (single CNAME, single base URL). All routing is server-side. The single side-effect the SDK must handle is a 308-redirect if the router decides to short-circuit cross-region (e.g., if an `na`-resident's session somehow lands on the EU edge, the router _could_ 308 to `na.auth.example.com` to avoid every NA-resident's session bouncing through the EU edge — but v1 just pays the in-network proxy cost and keeps one public domain).
+
+### Phase 4 — open questions deliberately deferred
+
+- **Cross-jurisdiction account move** (EU resident relocates to US). Cleanest answer: create new principal in NA, link old via account merge, deprecate old. No data crosses borders.
+- **Cross-shard rebalancing** (one shard fills faster than others). Add a new shard, gate new signups to it, never move old principals.
+- **Hyperdrive (Postgres) variant of the same pattern.** Same router; replace D1 bindings with Hyperdrive configs. Sharding becomes Postgres logical-replication territory.
 
 ## UserDO pre-warm pool (planned)
 

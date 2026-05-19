@@ -310,7 +310,18 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
         );
     }
 
+    /**
+     * After each enqueue, this method:
+     *   1. Immediately attempts to drain via `ctx.waitUntil(drain())` so the
+     *      DB sync happens in the ~50-200ms after the response is returned
+     *      (not 3s later via alarm).
+     *   2. Also schedules the alarm as a safety net — if waitUntil fails
+     *      (DO restarted, D1 outage, etc.), the alarm catches it and retries.
+     */
     private async scheduleRecoveryFlush(): Promise<void> {
+        // Immediate attempt — runs after the response is sent.
+        this.ctx.waitUntil(this.drainRecoveryOutbox().catch(() => 0));
+        // Alarm fallback — only set if not already scheduled.
         const current = await this.ctx.storage.getAlarm();
         if (current === null) {
             await this.ctx.storage.setAlarm(Date.now() + RECOVERY_ALARM_INTERVAL_MS);

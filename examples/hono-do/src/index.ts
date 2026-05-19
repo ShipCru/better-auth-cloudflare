@@ -45,6 +45,57 @@ app.get("/protected", async c => {
 app.get("/health", c => c.json({ status: "ok" }));
 
 /**
+ * Admin/dashboard read endpoint. Reads users straight from the D1 recovery
+ * store. This is the "dashboard" use case: D1 is kept in sync by the
+ * UserDO outbox + alarm + waitUntil, so queries here are at most ~10s
+ * behind live DO state.
+ *
+ * Demonstrates the read pattern. NOT protected here — wrap in your own
+ * admin auth for production. (BA itself has no built-in admin role; check
+ * `session.user.email` against an allow-list or use a separate admin token.)
+ */
+app.get("/admin/users", async c => {
+    const db = c.env.AUTH_RECOVERY_DB;
+    if (!db) return c.json({ error: "AUTH_RECOVERY_DB not bound" }, 503);
+
+    const limit = Math.min(parseInt(c.req.query("limit") ?? "20", 10), 100);
+    const offset = parseInt(c.req.query("offset") ?? "0", 10);
+
+    const result = await db
+        .prepare(
+            `SELECT id, name, email, email_verified, is_anonymous, created_at, updated_at
+               FROM users
+               WHERE deleted_at IS NULL
+               ORDER BY created_at DESC
+               LIMIT ? OFFSET ?`
+        )
+        .bind(limit, offset)
+        .all();
+
+    const total = (await db.prepare(`SELECT COUNT(*) AS c FROM users WHERE deleted_at IS NULL`).first()) as {
+        c: number;
+    } | null;
+
+    return c.json({
+        users: result.results,
+        pagination: { limit, offset, total: total?.c ?? 0 },
+    });
+});
+
+/** Same but for accounts — shows which providers each user has linked. */
+app.get("/admin/accounts", async c => {
+    const db = c.env.AUTH_RECOVERY_DB;
+    if (!db) return c.json({ error: "AUTH_RECOVERY_DB not bound" }, 503);
+    const userId = c.req.query("userId");
+    if (!userId) return c.json({ error: "userId query param required" }, 400);
+    const result = await db
+        .prepare(`SELECT id, provider_id, account_id, created_at FROM accounts WHERE user_id = ?`)
+        .bind(userId)
+        .all();
+    return c.json({ accounts: result.results });
+});
+
+/**
  * Dev-only metadata endpoint. Surfaces the Cloudflare request region (where
  * the user hit the edge), the resolved principal id (= DO name for this
  * principal), and bindings available at the Worker. Useful for debugging

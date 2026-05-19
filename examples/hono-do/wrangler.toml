@@ -44,9 +44,11 @@ dataset = "ba_cf_do_events"
 #   # paste the id below
 #   wrangler d1 execute ba-cf-do-recovery --remote --file ./recovery-schema.sql
 #
-# Uncomment and fill in the id to enable:
-#
-# [[d1_databases]]
-# binding = "AUTH_RECOVERY_DB"
-# database_name = "ba-cf-do-recovery"
-# database_id = "YOUR_D1_DATABASE_ID"
+# Wired by default in this demo for local testing. The database_id is a
+# placeholder — wrangler local mode creates an in-memory SQLite. For
+# remote deploy, run `wrangler d1 create ba-cf-do-recovery` and paste the
+# real id here.
+[[d1_databases]]
+binding = "AUTH_RECOVERY_DB"
+database_name = "ba-cf-do-recovery"
+database_id = "00000000-0000-0000-0000-000000000000"

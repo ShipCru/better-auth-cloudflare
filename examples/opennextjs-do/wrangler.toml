@@ -67,3 +67,10 @@ service = "better-auth-cloudflare-hono-do-recommended"
 [[services]]
 binding = "AUTH_BACKEND_STATELESS"
 service = "better-auth-cloudflare-hono-do-stateless"
+
+# Probe Worker — owns the regional ProbeDurableObject instances.
+# `POST /probe` fans out to all CF regions via locationHint-pinned DOs.
+# Bench page calls this for the "Run from all regions" feature.
+[[services]]
+binding = "PROBE_WORKER"
+service = "better-auth-cloudflare-probe"

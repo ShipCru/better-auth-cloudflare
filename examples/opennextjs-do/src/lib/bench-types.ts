@@ -19,9 +19,16 @@ export const BACKEND_VARIANTS = [
     {
         id: "current",
         binding: "AUTH_BACKEND",
-        label: "Current (DO + IdentityDO + scrypt default)",
+        label: "Current (IdentityDO → UserDO bounce, scrypt default)",
         description:
-            "The deployed better-auth-cloudflare-hono-do Worker as of PR #5. Per-principal UserDO, per-email IdentityDO, BA scrypt defaults.",
+            "The default better-auth-cloudflare-hono-do Worker. Sign-in does 3 DO RPCs: IdentityDO.lookup → UserDO.findPrincipal → UserDO.listAccounts.",
+    },
+    {
+        id: "thick-identity",
+        binding: "AUTH_BACKEND_THICK_ID",
+        label: "Thick IdentityDO (emailHash is primary lookup) — live",
+        description:
+            "Sibling deploy with thickIdentity=true. Sign-in is ONE DO RPC: IdentityDO.signInLookup returns principal + accounts from its denormalised thick_cache. Writes fan-out to both DOs.",
     },
     {
         id: "d1-unique",

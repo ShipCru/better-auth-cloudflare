@@ -59,3 +59,42 @@ database_id = "00000000-0000-0000-0000-000000000000"
 # When set, the demo's "Continue with Google" button works end-to-end.
 # Callback URL to register in Google Console:
 #   https://your-worker-url/api/auth/callback/google
+
+# Sibling deploy: same source code, opts into the IdentityDO thick_cache
+# fast path. The bench page A/B's this against the default deploy.
+#
+#   wrangler deploy --env thick
+#
+# Bindings are independent — separate DO namespaces, KV, D1 — so the two
+# deploys never share state. That's the right call for clean A/B numbers.
+[env.thick]
+name = "better-auth-cloudflare-hono-do-thick"
+
+[env.thick.observability]
+enabled = true
+
+[env.thick.vars]
+USE_THICK_IDENTITY = "1"
+
+[[env.thick.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.thick.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.thick.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.thick.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.thick.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+# Skip D1 for the thick env to remove that variable from the bench
+# comparison. Add it back if you want recovery for the thick deploy too.

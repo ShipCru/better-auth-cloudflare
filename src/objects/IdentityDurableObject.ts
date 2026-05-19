@@ -28,6 +28,21 @@ CREATE TABLE IF NOT EXISTS identity (
   committed_at            TEXT,
   disabled_at             TEXT
 );
+
+-- Thick mode cache. Populated only when the adapter is configured with
+-- thickIdentity=true. Holds a JSON snapshot of the principal record and
+-- the principals account list (including password hash), keyed by
+-- email_hash. Lets sign-in flows answer findOne(user, email, join.account)
+-- in ONE DO RPC instead of three: no IdentityDO to UserDO bounce, no
+-- separate listAccounts call. The principal_id pointer in the identity
+-- table remains the canonical mapping; this table is purely a
+-- denormalised read cache that the adapter keeps in sync on every write.
+CREATE TABLE IF NOT EXISTS thick_cache (
+  email_hash      TEXT PRIMARY KEY,
+  principal_blob  TEXT NOT NULL,
+  accounts_blob   TEXT NOT NULL,
+  cached_at       TEXT NOT NULL
+);
 `;
 
 const RESERVATION_TTL_MS = 30_000;
@@ -172,8 +187,78 @@ export class IdentityDurableObject<
                 emailHash,
                 new Date().toISOString()
             );
+            // Invalidate thick cache for this identity if present.
+            runSql(this.ctx.storage.sql, `DELETE FROM thick_cache WHERE email_hash = ?`, emailHash);
         });
     }
+
+    // ───── Thick mode (opt-in) ──────────────────────────────────────────
+    //
+    // When the adapter is configured with thickIdentity=true, it writes a
+    // denormalised snapshot of the principal record + account list here
+    // alongside every UserDO write. Then sign-in reads (`signInLookup`)
+    // get the password hash + user record in ONE DO RPC instead of
+    // bouncing IdentityDO → UserDO.findPrincipal → UserDO.listAccounts.
+
+    async upsertCachedData(emailHash: string, principalBlob: string, accountsBlob: string): Promise<void> {
+        return timed(this.log, "upsertCachedData", async () => {
+            runSql(
+                this.ctx.storage.sql,
+                `INSERT INTO thick_cache (email_hash, principal_blob, accounts_blob, cached_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(email_hash) DO UPDATE
+         SET principal_blob = excluded.principal_blob,
+             accounts_blob = excluded.accounts_blob,
+             cached_at = excluded.cached_at`,
+                emailHash,
+                principalBlob,
+                accountsBlob,
+                new Date().toISOString()
+            );
+        });
+    }
+
+    /**
+     * Single-RPC sign-in lookup. Returns the principal_id + user record +
+     * accounts in one round-trip when the thick cache is populated; falls
+     * back to a thin response (principalId only) when it isn't, so callers
+     * can degrade gracefully to the legacy two-RPC path.
+     */
+    async signInLookup(emailHash: string): Promise<SignInLookupResult | null> {
+        return timed(this.log, "signInLookup", async () => {
+            const sql = this.ctx.storage.sql;
+            const identity = runSql(
+                sql,
+                `SELECT principal_id, state FROM identity WHERE email_hash = ?`,
+                emailHash
+            ).toArray()[0] as unknown as { principal_id: string | null; state: string } | undefined;
+            if (!identity || identity.state !== "committed" || !identity.principal_id) return null;
+
+            const cached = runSql(
+                sql,
+                `SELECT principal_blob, accounts_blob FROM thick_cache WHERE email_hash = ?`,
+                emailHash
+            ).toArray()[0] as unknown as { principal_blob: string; accounts_blob: string } | undefined;
+
+            if (!cached) {
+                // Thin response — caller must still fetch from UserDO.
+                return { principalId: identity.principal_id, principal: null, accounts: null };
+            }
+            return {
+                principalId: identity.principal_id,
+                principal: cached.principal_blob,
+                accounts: cached.accounts_blob,
+            };
+        });
+    }
+}
+
+export interface SignInLookupResult {
+    principalId: string;
+    /** JSON-encoded PrincipalRecord, or null if thick cache not populated. */
+    principal: string | null;
+    /** JSON-encoded AccountRecord[], or null if thick cache not populated. */
+    accounts: string | null;
 }
 
 interface RawIdentity {

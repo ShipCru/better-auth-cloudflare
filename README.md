@@ -106,6 +106,13 @@ Demo implementations are available in the [`examples/`](./examples/) directory f
 - [ ] **Bulk KV reads in session validation** — combine session + user + account lookups into a single `Promise.all` with all three KV GETs in parallel.
 - [ ] **Document KV consistency model + TTL choices** — README section explaining when stale reads are acceptable (sessions, profile data) vs when they are not (email uniqueness — backed by D1 UNIQUE; password verification — bypasses cache).
 
+**Deployment + CI/CD:**
+
+- [ ] **Automatic git deployment** — GitHub Actions workflow that on push to `main` runs `pnpm build` then `wrangler deploy` for each Worker in `examples/*` whose source changed (path filter). Secrets (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`) live in GitHub Actions secrets; per-Worker secrets like `BETTER_AUTH_SECRET` and `GOOGLE_CLIENT_*` injected via `wrangler secret put` from CI. No manual `wrangler deploy` from a laptop.
+- [ ] **Per-PR preview deployments** — each PR gets a `*-pr-<n>.workers.dev` preview environment built from the PR head. Drops the manual "deploy then ask user to verify" loop. Bench page becomes a per-PR demo, and reviewers can A/B against prod in real time.
+- [ ] **Drift detection** — daily job that diffs `wrangler.toml` declared bindings vs `wrangler deployments list` actual state. Surfaces "production has secrets/bindings that no longer match the repo" before it becomes an incident.
+- [ ] **Database schema sync in CI** — for D1, on push run `wrangler d1 execute --remote --file auth-data-schema.sql` against the recovery DB. Detects schema drift, fails the build if migrations would be data-destructive.
+
 **Collaborative editing primitives (Glass / ShipCru-specific):**
 
 - [ ] **ResumeDurableObject** with WebSocket Hibernation API (`ctx.acceptWebSocket`). One DO per resume, holds canonical document, broadcasts edits to all connected sessions, hibernates when idle. Auth-gated via session cookie verification before `acceptWebSocket`. Op-log + periodic snapshot; CRDT-friendly (LWW or Yjs-compatible binary deltas).

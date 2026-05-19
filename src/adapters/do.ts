@@ -1,7 +1,7 @@
 import type { DurableObjectNamespace } from "@cloudflare/workers-types";
 import { createLogger, shortHash, type Logger } from "../logging";
 import type { PrincipalRecord, AccountRecord } from "../objects/UserDurableObject";
-import { bestEffortRecoveryWrite, type RecoveryStore } from "./recovery";
+import type { RecoveryStore } from "./recovery";
 
 /**
  * Better Auth adapter backed by per-principal Durable Objects.
@@ -45,19 +45,15 @@ export interface DOAdapterConfig {
      */
     region?: RegionContext;
     /**
-     * Optional recovery store. When supplied, every successful DO write is
-     * mirrored to it on a best-effort basis. Use
-     * `recoverPrincipalFromRecoveryStore` to replay back into the DO if
-     * its storage is lost.
+     * Optional recovery store reference. Pass this if you intend to call
+     * `recoverPrincipalFromRecoveryStore` from your Worker — it's not used
+     * for write-mirroring here.
      *
-     * **The recovery store is one-way: DOs sync to it; it is NEVER queried
-     * during auth flows.** All sign-in / session-validate / find-user-by-
-     * email paths read from the DOs only. The recovery store exists for DR
-     * and admin restore — nothing else.
-     *
-     * Failures of recovery-store writes are logged but never throw. The
-     * primary auth flow must never block on the recovery layer. Use
-     * `d1RecoveryStore(env.DB)` for a D1-backed implementation.
+     * **Sync to the recovery store is owned by the DO**, not the adapter.
+     * Bind your D1 database as `AUTH_RECOVERY_DB` in wrangler.toml and the
+     * UserDurableObject's outbox + 3s alarm will keep D1 eventually
+     * consistent with the DO state (typical lag ~3-6s). See README for
+     * details and the schema in `RECOVERY_D1_SCHEMA`.
      */
     recoveryStore?: RecoveryStore;
 }
@@ -174,11 +170,6 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                         refreshTokenExpiresAt: serialiseDate(data.refreshTokenExpiresAt),
                         scope: (data.scope as string | undefined) ?? null,
                     });
-                    if (config.recoveryStore) {
-                        await bestEffortRecoveryWrite(log, "writeAccount", () =>
-                            config.recoveryStore!.writeAccount(account as AccountRecord)
-                        );
-                    }
                     return mapAccountToBA(account) as never;
                 }
                 unsupported("create", model, "use BA secondaryStorage for session/verification");
@@ -291,9 +282,6 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                         emailVerified: update.emailVerified as boolean | undefined,
                         image: update.image as string | undefined,
                     })) as PrincipalRecord;
-                    if (config.recoveryStore) {
-                        await bestEffortRecoveryWrite(log, "writeUser", () => config.recoveryStore!.writeUser(p));
-                    }
                     return mapPrincipalToBA(p) as never;
                 }
 
@@ -338,9 +326,6 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                     }
                     // @ts-expect-error
                     await stub.deletePrincipal();
-                    if (config.recoveryStore) {
-                        await bestEffortRecoveryWrite(log, "deleteUser", () => config.recoveryStore!.deleteUser(id));
-                    }
                     return;
                 }
 
@@ -448,9 +433,6 @@ async function createUser(
             await userStub.deletePrincipal();
             // fall through to throw below — no fallback write if commit failed
             throw new Error(`do-adapter: identity commit failed (${commit.reason})`);
-        }
-        if (config.recoveryStore) {
-            await bestEffortRecoveryWrite(log, "writeUser", () => config.recoveryStore!.writeUser(p));
         }
         return mapPrincipalToBA(p);
     } catch (err) {

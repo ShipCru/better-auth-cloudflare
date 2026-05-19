@@ -44,7 +44,26 @@ CREATE TABLE IF NOT EXISTS accounts (
   updated_at               TEXT NOT NULL,
   UNIQUE (provider_id, account_id)
 );
+
+-- Recovery outbox. Every write to principal/accounts enqueues an event.
+-- The DO's alarm (every ~3s) drains pending events to the configured
+-- D1 recovery binding (env.AUTH_RECOVERY_DB by convention). Eventually
+-- consistent with a bounded lag (~3-6s under healthy D1, more on retry).
+CREATE TABLE IF NOT EXISTS recovery_outbox (
+  event_id            TEXT PRIMARY KEY,
+  model               TEXT NOT NULL,
+  op                  TEXT NOT NULL CHECK (op IN ('upsert','delete')),
+  payload_json        TEXT NOT NULL,
+  attempts            INTEGER NOT NULL DEFAULT 0,
+  created_at          TEXT NOT NULL,
+  next_attempt_at     TEXT,
+  sent_at             TEXT
+);
 `;
+
+const RECOVERY_ALARM_INTERVAL_MS = 3_000;
+const RECOVERY_BATCH_SIZE = 25;
+const RECOVERY_BACKOFF_CAP_S = 30;
 
 export interface PrincipalRecord {
     id: string;
@@ -110,7 +129,12 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
             now,
             input.extra ? JSON.stringify(input.extra) : null
         );
-        return this.findPrincipalOrThrow();
+        const principal = this.findPrincipalOrThrow();
+        if (!principal.isAnonymous) {
+            this.enqueueRecovery("user", "upsert", principal);
+            await this.scheduleRecoveryFlush();
+        }
+        return principal;
     }
 
     async findPrincipal(): Promise<PrincipalRecord | null> {
@@ -151,12 +175,22 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
         }
 
         runSql(this.ctx.storage.sql, `UPDATE principal SET ${set.join(", ")}`, ...args);
-        return this.findPrincipalOrThrow();
+        const principal = this.findPrincipalOrThrow();
+        if (!principal.isAnonymous) {
+            this.enqueueRecovery("user", "upsert", principal);
+            await this.scheduleRecoveryFlush();
+        }
+        return principal;
     }
 
     async deletePrincipal(): Promise<void> {
+        const before = await this.findPrincipal();
         runSql(this.ctx.storage.sql, `DELETE FROM accounts`);
         runSql(this.ctx.storage.sql, `DELETE FROM principal`);
+        if (before && !before.isAnonymous) {
+            this.enqueueRecovery("user", "delete", { id: before.id });
+            await this.scheduleRecoveryFlush();
+        }
     }
 
     // ───── Accounts ──────────────────────────────────────────────────────
@@ -184,7 +218,10 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
             now,
             now
         );
-        return this.findAccountByIdOrThrow(input.id, input.userId);
+        const account = this.findAccountByIdOrThrow(input.id, input.userId);
+        this.enqueueRecovery("account", "upsert", account);
+        await this.scheduleRecoveryFlush();
+        return account;
     }
 
     async findAccountById(id: string, userId: string): Promise<AccountRecord | null> {
@@ -238,11 +275,187 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
 
         args.push(id);
         runSql(this.ctx.storage.sql, `UPDATE accounts SET ${set.join(", ")} WHERE id = ?`, ...args);
-        return this.findAccountById(id, userId);
+        const account = await this.findAccountById(id, userId);
+        if (account) {
+            this.enqueueRecovery("account", "upsert", account);
+            await this.scheduleRecoveryFlush();
+        }
+        return account;
     }
 
     async deleteAccount(id: string): Promise<void> {
         runSql(this.ctx.storage.sql, `DELETE FROM accounts WHERE id = ?`, id);
+        this.enqueueRecovery("account", "delete", { id });
+        await this.scheduleRecoveryFlush();
+    }
+
+    // ───── Recovery outbox + alarm ───────────────────────────────────────
+    //
+    // Every state-changing operation enqueues a recovery event. A 3s alarm
+    // drains the outbox to env.AUTH_RECOVERY_DB (if bound) so the recovery
+    // store stays eventually consistent within ~3-6s under healthy D1.
+    // The auth hot path NEVER waits on the recovery flush — these methods
+    // return as soon as the local DO write succeeds.
+
+    private enqueueRecovery(model: "user" | "account", op: "upsert" | "delete", payload: unknown): void {
+        runSql(
+            this.ctx.storage.sql,
+            `INSERT INTO recovery_outbox (event_id, model, op, payload_json, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+            crypto.randomUUID(),
+            model,
+            op,
+            JSON.stringify(payload),
+            new Date().toISOString()
+        );
+    }
+
+    private async scheduleRecoveryFlush(): Promise<void> {
+        const current = await this.ctx.storage.getAlarm();
+        if (current === null) {
+            await this.ctx.storage.setAlarm(Date.now() + RECOVERY_ALARM_INTERVAL_MS);
+        }
+    }
+
+    async alarm(): Promise<void> {
+        const remaining = await this.drainRecoveryOutbox();
+        if (remaining > 0) {
+            await this.ctx.storage.setAlarm(Date.now() + RECOVERY_ALARM_INTERVAL_MS);
+        }
+    }
+
+    /**
+     * Drains pending recovery_outbox rows to env.AUTH_RECOVERY_DB. Returns
+     * the number of rows still pending after the drain (so caller can
+     * decide whether to reschedule the alarm).
+     */
+    private async drainRecoveryOutbox(): Promise<number> {
+        const db = (this.env as { AUTH_RECOVERY_DB?: import("@cloudflare/workers-types").D1Database }).AUTH_RECOVERY_DB;
+        if (!db) {
+            // No recovery binding — clear pending rows so they don't accumulate.
+            runSql(this.ctx.storage.sql, `DELETE FROM recovery_outbox WHERE sent_at IS NULL`);
+            return 0;
+        }
+
+        const now = new Date().toISOString();
+        const pending = runSql(
+            this.ctx.storage.sql,
+            `SELECT event_id, model, op, payload_json, attempts
+         FROM recovery_outbox
+         WHERE sent_at IS NULL
+           AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+         ORDER BY created_at
+         LIMIT ?`,
+            now,
+            RECOVERY_BATCH_SIZE
+        ).toArray() as unknown as Array<{
+            event_id: string;
+            model: string;
+            op: "upsert" | "delete";
+            payload_json: string;
+            attempts: number;
+        }>;
+
+        for (const row of pending) {
+            try {
+                await this.applyRecoveryEvent(db, row.model, row.op, JSON.parse(row.payload_json));
+                runSql(
+                    this.ctx.storage.sql,
+                    `UPDATE recovery_outbox SET sent_at = ? WHERE event_id = ?`,
+                    now,
+                    row.event_id
+                );
+            } catch (err) {
+                const backoff = Math.min(RECOVERY_BACKOFF_CAP_S, 2 ** Math.min(row.attempts, 6));
+                const next = new Date(Date.now() + backoff * 1000).toISOString();
+                runSql(
+                    this.ctx.storage.sql,
+                    `UPDATE recovery_outbox SET attempts = attempts + 1, next_attempt_at = ? WHERE event_id = ?`,
+                    next,
+                    row.event_id
+                );
+                console.error("recovery drain failed", { eventId: row.event_id, model: row.model, op: row.op, err });
+            }
+        }
+
+        // GC sent rows older than 1 hour so the outbox doesn't grow unbounded.
+        const gcCutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+        runSql(this.ctx.storage.sql, `DELETE FROM recovery_outbox WHERE sent_at IS NOT NULL AND sent_at < ?`, gcCutoff);
+
+        const remaining = runSql(
+            this.ctx.storage.sql,
+            `SELECT COUNT(*) AS c FROM recovery_outbox WHERE sent_at IS NULL`
+        ).one() as { c: number };
+        return remaining.c;
+    }
+
+    private async applyRecoveryEvent(
+        db: import("@cloudflare/workers-types").D1Database,
+        model: string,
+        op: "upsert" | "delete",
+        payload: Record<string, unknown>
+    ): Promise<void> {
+        if (model === "user") {
+            if (op === "upsert") {
+                await db
+                    .prepare(
+                        `INSERT INTO users (id, name, email, email_verified, image, is_anonymous, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               name = excluded.name,
+               email = excluded.email,
+               email_verified = excluded.email_verified,
+               image = excluded.image,
+               is_anonymous = excluded.is_anonymous,
+               updated_at = excluded.updated_at`
+                    )
+                    .bind(
+                        payload.id,
+                        payload.name ?? null,
+                        payload.email ?? null,
+                        payload.emailVerified ? 1 : 0,
+                        payload.image ?? null,
+                        payload.isAnonymous ? 1 : 0,
+                        payload.createdAt,
+                        payload.updatedAt
+                    )
+                    .run();
+                return;
+            }
+            if (op === "delete") {
+                const now = new Date().toISOString();
+                await db
+                    .prepare(`UPDATE users SET deleted_at = ?, updated_at = ? WHERE id = ?`)
+                    .bind(now, now, payload.id)
+                    .run();
+                return;
+            }
+        }
+        if (model === "account") {
+            if (op === "upsert") {
+                await db
+                    .prepare(
+                        `INSERT INTO accounts (id, user_id, provider_id, account_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at`
+                    )
+                    .bind(
+                        payload.id,
+                        payload.userId,
+                        payload.providerId,
+                        payload.accountId ?? null,
+                        payload.createdAt,
+                        payload.updatedAt
+                    )
+                    .run();
+                return;
+            }
+            if (op === "delete") {
+                await db.prepare(`DELETE FROM accounts WHERE id = ?`).bind(payload.id).run();
+                return;
+            }
+        }
+        throw new Error(`UserDurableObject.applyRecoveryEvent: unhandled (${model}, ${op})`);
     }
 
     // ───── Internal ──────────────────────────────────────────────────────

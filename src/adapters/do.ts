@@ -1,5 +1,5 @@
 import type { DurableObjectNamespace } from "@cloudflare/workers-types";
-import { createLogger, shortHash, type Logger } from "../logging";
+import { createLogger, shortHash, timed, type Logger } from "../logging";
 import type { PrincipalRecord, AccountRecord } from "../objects/UserDurableObject";
 import type { AuthDataStore } from "./auth-data";
 
@@ -141,167 +141,262 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
     const identityStub = (emailHash: string) =>
         config.identityDo.get(config.identityDo.idFromName(`identity:${emailHash}`));
 
+    /**
+     * Short-lived per-isolate cache of records just written by adapter.create().
+     * Better Auth's signup flow calls adapter.create(user) and immediately
+     * after calls adapter.findOne({ model: "user", where: { id } }) to
+     * re-fetch the row it just inserted. That round-trips back to the DO
+     * for ~6ms warm / ~400-700ms cold. Serving the same record from this
+     * map saves a full DO RPC per signup. TTL is intentionally short
+     * (FRESH_WRITE_TTL_MS) — anything older falls back to the DO so
+     * adapter never serves stale state.
+     */
+    const freshWrites = new Map<string, { record: Record<string, unknown>; expiresAt: number }>();
+    const FRESH_WRITE_TTL_MS = 5_000;
+    function rememberFresh(kind: "user" | "account", id: string, record: Record<string, unknown>): void {
+        freshWrites.set(`${kind}:${id}`, { record, expiresAt: Date.now() + FRESH_WRITE_TTL_MS });
+    }
+    function takeFresh(kind: "user" | "account", id: string): Record<string, unknown> | null {
+        const key = `${kind}:${id}`;
+        const hit = freshWrites.get(key);
+        if (!hit) return null;
+        if (hit.expiresAt < Date.now()) {
+            freshWrites.delete(key);
+            return null;
+        }
+        // One-shot: consume on read. BA's post-create refetch is a single
+        // call; subsequent reads (different request) should go through the
+        // DO so we never serve stale data even within the 5s window.
+        freshWrites.delete(key);
+        return hit.record;
+    }
+
     const buildAdapter = (): Adapter =>
         ({
             id: "durable-object",
 
             async create({ model, data }) {
-                log.debug("create", { model, fields: Object.keys(data) });
+                return timed(
+                    log,
+                    "adapter.create",
+                    async () => {
+                        log.debug("create", { model, fields: Object.keys(data) });
 
-                if (model === "user") {
-                    return (await createUser(config, data, log)) as never;
-                }
-                if (model === "account") {
-                    const userId = data.userId as string;
-                    if (!userId) unsupported("create", model, "missing userId");
-                    const stub = userStub(userId);
-                    const id = (data.id as string) ?? crypto.randomUUID();
-                    // @ts-expect-error — DO RPC method
-                    const account = await stub.createAccount({
-                        id,
-                        userId,
-                        providerId: data.providerId as string,
-                        accountId: (data.accountId as string) ?? id,
-                        password: (data.password as string | undefined) ?? null,
-                        accessToken: (data.accessToken as string | undefined) ?? null,
-                        refreshToken: (data.refreshToken as string | undefined) ?? null,
-                        idToken: (data.idToken as string | undefined) ?? null,
-                        accessTokenExpiresAt: serialiseDate(data.accessTokenExpiresAt),
-                        refreshTokenExpiresAt: serialiseDate(data.refreshTokenExpiresAt),
-                        scope: (data.scope as string | undefined) ?? null,
-                    });
-                    return mapAccountToBA(account) as never;
-                }
-                unsupported("create", model, "use BA secondaryStorage for session/verification");
+                        if (model === "user") {
+                            const created = (await createUser(config, data, log)) as Record<string, unknown>;
+                            if (typeof created.id === "string") rememberFresh("user", created.id, created);
+                            return created as never;
+                        }
+                        if (model === "account") {
+                            const userId = data.userId as string;
+                            if (!userId) unsupported("create", model, "missing userId");
+                            const stub = userStub(userId);
+                            const id = (data.id as string) ?? crypto.randomUUID();
+                            // @ts-expect-error — DO RPC method
+                            const account = await stub.createAccount({
+                                id,
+                                userId,
+                                providerId: data.providerId as string,
+                                accountId: (data.accountId as string) ?? id,
+                                password: (data.password as string | undefined) ?? null,
+                                accessToken: (data.accessToken as string | undefined) ?? null,
+                                refreshToken: (data.refreshToken as string | undefined) ?? null,
+                                idToken: (data.idToken as string | undefined) ?? null,
+                                accessTokenExpiresAt: serialiseDate(data.accessTokenExpiresAt),
+                                refreshTokenExpiresAt: serialiseDate(data.refreshTokenExpiresAt),
+                                scope: (data.scope as string | undefined) ?? null,
+                            });
+                            const mapped = mapAccountToBA(account);
+                            rememberFresh("account", account.id, mapped);
+                            return mapped as never;
+                        }
+                        unsupported("create", model, "use BA secondaryStorage for session/verification");
+                    },
+                    { model }
+                );
             },
 
             async findOne({ model, where, join }) {
-                log.debug("findOne", { model, fields: where.map(w => w.field), join });
+                return timed(
+                    log,
+                    "adapter.findOne",
+                    async () => {
+                        log.debug("findOne", { model, fields: where.map(w => w.field), join });
 
-                if (model === "user") {
-                    const id = pickWhere(where, "id");
-                    const includeAccounts = join?.account === true;
-                    if (typeof id === "string") {
-                        const stub = userStub(id);
-                        // @ts-expect-error
-                        const p = (await stub.findPrincipal()) as PrincipalRecord | null;
-                        if (!p) return null;
-                        const baUser = mapPrincipalToBA(p);
-                        if (includeAccounts) {
-                            // @ts-expect-error
-                            const accounts = (await stub.listAccounts(p.id)) as AccountRecord[];
-                            (baUser as Record<string, unknown>).account = accounts.map(mapAccountToBA);
+                        if (model === "user") {
+                            const id = pickWhere(where, "id");
+                            const includeAccounts = join?.account === true;
+                            if (typeof id === "string") {
+                                // Fast path: BA's post-create refetch. Only skip
+                                // the DO RPC when no join is needed — joined reads
+                                // still have to talk to the DO for the account list.
+                                if (!includeAccounts) {
+                                    const fresh = takeFresh("user", id);
+                                    if (fresh) {
+                                        log.debug("findOne.fresh_hit", { model });
+                                        return fresh as never;
+                                    }
+                                }
+                                const stub = userStub(id);
+                                // @ts-expect-error
+                                const p = (await stub.findPrincipal()) as PrincipalRecord | null;
+                                if (!p) return null;
+                                const baUser = mapPrincipalToBA(p);
+                                if (includeAccounts) {
+                                    // @ts-expect-error
+                                    const accounts = (await stub.listAccounts(p.id)) as AccountRecord[];
+                                    (baUser as Record<string, unknown>).account = accounts.map(mapAccountToBA);
+                                }
+                                return baUser as never;
+                            }
+                            const email = pickWhere(where, "email");
+                            if (typeof email === "string") {
+                                // PERF: BA calls findOne({email}) as a pre-existence
+                                // check before signup. Hitting IdentityDO here for a
+                                // brand-new email triggers a fresh DO cold start
+                                // (~1-4s p95). The reserve() inside create() is
+                                // already the authoritative uniqueness gate — it
+                                // returns "taken" with the principal_id, which BA
+                                // surfaces as EMAIL_ALREADY_EXISTS. So we can answer
+                                // null here and let create do the real check.
+                                //
+                                // For the sign-IN path (where BA looks up an existing
+                                // user by email), this would break — but that path
+                                // actually uses findOne({email}) with join.account:
+                                // true, so the includeAccounts branch is what
+                                // matters. We still need to go to the DO for that.
+                                if (!includeAccounts) {
+                                    log.info("findOne.email.skipped_idDO", {});
+                                    return null;
+                                }
+                                const emailHash = await hashEmail(email);
+                                const idStub = identityStub(emailHash);
+                                // @ts-expect-error
+                                const lookup = (await idStub.lookup(emailHash)) as { principalId: string } | null;
+                                if (!lookup) return null;
+                                const stub = userStub(lookup.principalId);
+                                // @ts-expect-error
+                                const p = (await stub.findPrincipal()) as PrincipalRecord | null;
+                                if (!p) return null;
+                                const baUser = mapPrincipalToBA(p);
+                                // @ts-expect-error
+                                const accounts = (await stub.listAccounts(p.id)) as AccountRecord[];
+                                (baUser as Record<string, unknown>).account = accounts.map(mapAccountToBA);
+                                return baUser as never;
+                            }
+                            unsupported("findOne", model, "only `id` or `email` where-clauses supported");
                         }
-                        return baUser as never;
-                    }
-                    const email = pickWhere(where, "email");
-                    if (typeof email === "string") {
-                        const emailHash = await hashEmail(email);
-                        const idStub = identityStub(emailHash);
-                        // @ts-expect-error
-                        const lookup = (await idStub.lookup(emailHash)) as { principalId: string } | null;
-                        if (!lookup) return null;
-                        const stub = userStub(lookup.principalId);
-                        // @ts-expect-error
-                        const p = (await stub.findPrincipal()) as PrincipalRecord | null;
-                        if (!p) return null;
-                        const baUser = mapPrincipalToBA(p);
-                        if (includeAccounts) {
+
+                        if (model === "account") {
+                            const userId = pickWhere(where, "userId");
+                            if (typeof userId !== "string")
+                                unsupported("findOne", model, "userId required to route to UserDO");
+                            const stub = userStub(userId);
+                            const id = pickWhere(where, "id");
+                            const providerId = pickWhere(where, "providerId");
+                            const accountId = pickWhere(where, "accountId");
+                            if (typeof id === "string") {
+                                // BA's post-create refetch fast path (see user above).
+                                const fresh = takeFresh("account", id);
+                                if (fresh) {
+                                    log.debug("findOne.fresh_hit", { model });
+                                    return fresh as never;
+                                }
+                                // @ts-expect-error
+                                const a = (await stub.findAccountById(id, userId)) as AccountRecord | null;
+                                return a ? (mapAccountToBA(a) as never) : null;
+                            }
+                            if (typeof providerId === "string" && typeof accountId === "string") {
+                                // @ts-expect-error
+                                const a = (await stub.findAccountByProvider(
+                                    providerId,
+                                    accountId,
+                                    userId
+                                )) as AccountRecord | null;
+                                return a ? (mapAccountToBA(a) as never) : null;
+                            }
+                            if (typeof providerId === "string") {
+                                // Provider-only lookup (BA's email/password signin path):
+                                // walk the user's accounts and return the first match.
+                                // @ts-expect-error
+                                const list = (await stub.listAccounts(userId)) as AccountRecord[];
+                                const match = list.find(a => a.providerId === providerId);
+                                return match ? (mapAccountToBA(match) as never) : null;
+                            }
+                            // Fallback for queries with just userId: return first account.
                             // @ts-expect-error
-                            const accounts = (await stub.listAccounts(p.id)) as AccountRecord[];
-                            (baUser as Record<string, unknown>).account = accounts.map(mapAccountToBA);
+                            const list = (await stub.listAccounts(userId)) as AccountRecord[];
+                            return list[0] ? (mapAccountToBA(list[0]) as never) : null;
                         }
-                        return baUser as never;
-                    }
-                    unsupported("findOne", model, "only `id` or `email` where-clauses supported");
-                }
 
-                if (model === "account") {
-                    const userId = pickWhere(where, "userId");
-                    if (typeof userId !== "string") unsupported("findOne", model, "userId required to route to UserDO");
-                    const stub = userStub(userId);
-                    const id = pickWhere(where, "id");
-                    const providerId = pickWhere(where, "providerId");
-                    const accountId = pickWhere(where, "accountId");
-                    if (typeof id === "string") {
-                        // @ts-expect-error
-                        const a = (await stub.findAccountById(id, userId)) as AccountRecord | null;
-                        return a ? (mapAccountToBA(a) as never) : null;
-                    }
-                    if (typeof providerId === "string" && typeof accountId === "string") {
-                        // @ts-expect-error
-                        const a = (await stub.findAccountByProvider(
-                            providerId,
-                            accountId,
-                            userId
-                        )) as AccountRecord | null;
-                        return a ? (mapAccountToBA(a) as never) : null;
-                    }
-                    if (typeof providerId === "string") {
-                        // Provider-only lookup (BA's email/password signin path):
-                        // walk the user's accounts and return the first match.
-                        // @ts-expect-error
-                        const list = (await stub.listAccounts(userId)) as AccountRecord[];
-                        const match = list.find(a => a.providerId === providerId);
-                        return match ? (mapAccountToBA(match) as never) : null;
-                    }
-                    // Fallback for queries with just userId: return first account.
-                    // @ts-expect-error
-                    const list = (await stub.listAccounts(userId)) as AccountRecord[];
-                    return list[0] ? (mapAccountToBA(list[0]) as never) : null;
-                }
-
-                unsupported("findOne", model, "unsupported model");
+                        unsupported("findOne", model, "unsupported model");
+                    },
+                    { model }
+                );
             },
 
             async findMany({ model, where }) {
-                log.debug("findMany", { model, fields: (where ?? []).map(w => w.field) });
+                return timed(
+                    log,
+                    "adapter.findMany",
+                    async () => {
+                        log.debug("findMany", { model, fields: (where ?? []).map(w => w.field) });
 
-                if (model === "account") {
-                    const userId = pickWhere(where ?? [], "userId");
-                    if (typeof userId !== "string") unsupported("findMany", model, "userId required");
-                    const stub = userStub(userId);
-                    // @ts-expect-error
-                    const accounts = (await stub.listAccounts(userId)) as AccountRecord[];
-                    return accounts.map(mapAccountToBA) as never;
-                }
-                unsupported("findMany", model, "unsupported model");
+                        if (model === "account") {
+                            const userId = pickWhere(where ?? [], "userId");
+                            if (typeof userId !== "string") unsupported("findMany", model, "userId required");
+                            const stub = userStub(userId);
+                            // @ts-expect-error
+                            const accounts = (await stub.listAccounts(userId)) as AccountRecord[];
+                            return accounts.map(mapAccountToBA) as never;
+                        }
+                        unsupported("findMany", model, "unsupported model");
+                    },
+                    { model }
+                );
             },
 
             async update({ model, where, update }) {
-                log.debug("update", { model, fields: Object.keys(update) });
+                return timed(
+                    log,
+                    "adapter.update",
+                    async () => {
+                        log.debug("update", { model, fields: Object.keys(update) });
 
-                if (model === "user") {
-                    const id = pickWhere(where, "id");
-                    if (typeof id !== "string") unsupported("update", model, "id required");
-                    const stub = userStub(id);
-                    // @ts-expect-error
-                    const p = (await stub.updatePrincipal({
-                        name: update.name as string | undefined,
-                        email: update.email as string | undefined,
-                        emailVerified: update.emailVerified as boolean | undefined,
-                        image: update.image as string | undefined,
-                    })) as PrincipalRecord;
-                    return mapPrincipalToBA(p) as never;
-                }
+                        if (model === "user") {
+                            const id = pickWhere(where, "id");
+                            if (typeof id !== "string") unsupported("update", model, "id required");
+                            const stub = userStub(id);
+                            // @ts-expect-error
+                            const p = (await stub.updatePrincipal({
+                                name: update.name as string | undefined,
+                                email: update.email as string | undefined,
+                                emailVerified: update.emailVerified as boolean | undefined,
+                                image: update.image as string | undefined,
+                            })) as PrincipalRecord;
+                            return mapPrincipalToBA(p) as never;
+                        }
 
-                if (model === "account") {
-                    const id = pickWhere(where, "id");
-                    const userId = pickWhere(where, "userId") ?? update.userId;
-                    if (typeof id !== "string" || typeof userId !== "string") {
-                        unsupported("update", model, "id and userId required");
-                    }
-                    const stub = userStub(userId);
-                    // @ts-expect-error
-                    const a = (await stub.updateAccount(
-                        id,
-                        update as Partial<AccountRecord>,
-                        userId
-                    )) as AccountRecord | null;
-                    return a ? (mapAccountToBA(a) as never) : null;
-                }
+                        if (model === "account") {
+                            const id = pickWhere(where, "id");
+                            const userId = pickWhere(where, "userId") ?? update.userId;
+                            if (typeof id !== "string" || typeof userId !== "string") {
+                                unsupported("update", model, "id and userId required");
+                            }
+                            const stub = userStub(userId);
+                            // @ts-expect-error
+                            const a = (await stub.updateAccount(
+                                id,
+                                update as Partial<AccountRecord>,
+                                userId
+                            )) as AccountRecord | null;
+                            return a ? (mapAccountToBA(a) as never) : null;
+                        }
 
-                unsupported("update", model, "unsupported model");
+                        unsupported("update", model, "unsupported model");
+                    },
+                    { model }
+                );
             },
 
             async updateMany(_args) {
@@ -309,39 +404,46 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
             },
 
             async delete({ model, where }) {
-                log.debug("delete", { model });
+                return timed(
+                    log,
+                    "adapter.delete",
+                    async () => {
+                        log.debug("delete", { model });
 
-                if (model === "user") {
-                    const id = pickWhere(where, "id");
-                    if (typeof id !== "string") unsupported("delete", model, "id required");
-                    const stub = userStub(id);
-                    // @ts-expect-error
-                    const principal = (await stub.findPrincipal()) as PrincipalRecord | null;
-                    if (principal?.email) {
-                        const emailHash = await hashEmail(principal.email);
-                        const idStub = identityStub(emailHash);
-                        // @ts-expect-error
-                        await idStub.disable(emailHash);
-                        log.info("identity disabled on user delete", { emailHash: await shortHash(emailHash) });
-                    }
-                    // @ts-expect-error
-                    await stub.deletePrincipal();
-                    return;
-                }
+                        if (model === "user") {
+                            const id = pickWhere(where, "id");
+                            if (typeof id !== "string") unsupported("delete", model, "id required");
+                            const stub = userStub(id);
+                            // @ts-expect-error
+                            const principal = (await stub.findPrincipal()) as PrincipalRecord | null;
+                            if (principal?.email) {
+                                const emailHash = await hashEmail(principal.email);
+                                const idStub = identityStub(emailHash);
+                                // @ts-expect-error
+                                await idStub.disable(emailHash);
+                                log.info("identity disabled on user delete", { emailHash: await shortHash(emailHash) });
+                            }
+                            // @ts-expect-error
+                            await stub.deletePrincipal();
+                            return;
+                        }
 
-                if (model === "account") {
-                    const id = pickWhere(where, "id");
-                    const userId = pickWhere(where, "userId");
-                    if (typeof id !== "string" || typeof userId !== "string") {
-                        unsupported("delete", model, "id and userId required");
-                    }
-                    const stub = userStub(userId);
-                    // @ts-expect-error
-                    await stub.deleteAccount(id);
-                    return;
-                }
+                        if (model === "account") {
+                            const id = pickWhere(where, "id");
+                            const userId = pickWhere(where, "userId");
+                            if (typeof id !== "string" || typeof userId !== "string") {
+                                unsupported("delete", model, "id and userId required");
+                            }
+                            const stub = userStub(userId);
+                            // @ts-expect-error
+                            await stub.deleteAccount(id);
+                            return;
+                        }
 
-                unsupported("delete", model, "unsupported model");
+                        unsupported("delete", model, "unsupported model");
+                    },
+                    { model }
+                );
             },
 
             async deleteMany(_args) {

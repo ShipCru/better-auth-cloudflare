@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { runSql } from "./sql";
+import { createLogger, timed, type Logger, type LogLevel } from "../logging";
 
 /**
  * Per-principal Durable Object owning the BA `user` and `account` models.
@@ -98,14 +99,23 @@ export interface UserDurableObjectEnv {
 }
 
 export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObjectEnv> extends DurableObject<Env> {
+    private readonly log: Logger;
+
     constructor(state: DurableObjectState, env: Env) {
         super(state, env);
+        // Log level is read from LOG_LEVEL on the DO's env (set in
+        // wrangler.toml [vars]). Defaults to "info" — emit per-method
+        // timing so we can see what dominates on the hot path.
+        const level = ((env as { LOG_LEVEL?: string }).LOG_LEVEL ?? "info") as LogLevel;
+        this.log = createLogger({ scope: "user-do", level }).child("rpc", { doId: state.id.toString() });
         // Schema setup must serialise across concurrent first-requests so
         // two RPCs hitting a cold DO don't race on CREATE TABLE / IF NOT
         // EXISTS. blockConcurrencyWhile is the documented pattern.
         // See https://developers.cloudflare.com/durable-objects/best-practices/error-handling/
         state.blockConcurrencyWhile(async () => {
+            const t0 = Date.now();
             runSql(state.storage.sql, USER_DO_SCHEMA);
+            this.log.info("schema_ready", { durationMs: Date.now() - t0 });
         });
     }
 
@@ -120,83 +130,96 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
         isAnonymous?: boolean;
         extra?: Record<string, unknown>;
     }): Promise<PrincipalRecord> {
-        const now = new Date().toISOString();
-        runSql(
-            this.ctx.storage.sql,
-            `INSERT INTO principal (id, name, email, email_verified, image, is_anonymous, created_at, updated_at, extra_json)
+        return timed(
+            this.log,
+            "createPrincipal",
+            async () => {
+                const now = new Date().toISOString();
+                runSql(
+                    this.ctx.storage.sql,
+                    `INSERT INTO principal (id, name, email, email_verified, image, is_anonymous, created_at, updated_at, extra_json)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            input.id,
-            input.name ?? null,
-            input.email ?? null,
-            input.emailVerified ? 1 : 0,
-            input.image ?? null,
-            input.isAnonymous ? 1 : 0,
-            now,
-            now,
-            input.extra ? JSON.stringify(input.extra) : null
+                    input.id,
+                    input.name ?? null,
+                    input.email ?? null,
+                    input.emailVerified ? 1 : 0,
+                    input.image ?? null,
+                    input.isAnonymous ? 1 : 0,
+                    now,
+                    now,
+                    input.extra ? JSON.stringify(input.extra) : null
+                );
+                const principal = this.findPrincipalOrThrow();
+                if (!principal.isAnonymous) {
+                    this.enqueueAuthEvent("user", "upsert", principal);
+                    await this.scheduleAuthFlush();
+                }
+                return principal;
+            },
+            { isAnonymous: input.isAnonymous === true }
         );
-        const principal = this.findPrincipalOrThrow();
-        if (!principal.isAnonymous) {
-            this.enqueueAuthEvent("user", "upsert", principal);
-            await this.scheduleAuthFlush();
-        }
-        return principal;
     }
 
     async findPrincipal(): Promise<PrincipalRecord | null> {
-        const row = runSql(this.ctx.storage.sql, `SELECT * FROM principal LIMIT 1`).toArray()[0] as unknown as
-            | RawPrincipal
-            | undefined;
-        return row ? toPrincipal(row) : null;
+        return timed(this.log, "findPrincipal", async () => {
+            const row = runSql(this.ctx.storage.sql, `SELECT * FROM principal LIMIT 1`).toArray()[0] as unknown as
+                | RawPrincipal
+                | undefined;
+            return row ? toPrincipal(row) : null;
+        });
     }
 
     async updatePrincipal(patch: Partial<Omit<PrincipalRecord, "id" | "createdAt">>): Promise<PrincipalRecord> {
-        const now = new Date().toISOString();
-        const set: string[] = ["updated_at = ?"];
-        const args: (string | number | null)[] = [now];
+        return timed(this.log, "updatePrincipal", async () => {
+            const now = new Date().toISOString();
+            const set: string[] = ["updated_at = ?"];
+            const args: (string | number | null)[] = [now];
 
-        if ("name" in patch) {
-            set.push("name = ?");
-            args.push(patch.name ?? null);
-        }
-        if ("email" in patch) {
-            set.push("email = ?");
-            args.push(patch.email ?? null);
-        }
-        if ("emailVerified" in patch) {
-            set.push("email_verified = ?");
-            args.push(patch.emailVerified ? 1 : 0);
-        }
-        if ("image" in patch) {
-            set.push("image = ?");
-            args.push(patch.image ?? null);
-        }
-        if ("isAnonymous" in patch) {
-            set.push("is_anonymous = ?");
-            args.push(patch.isAnonymous ? 1 : 0);
-        }
-        if ("extra" in patch) {
-            set.push("extra_json = ?");
-            args.push(patch.extra ? JSON.stringify(patch.extra) : null);
-        }
+            if ("name" in patch) {
+                set.push("name = ?");
+                args.push(patch.name ?? null);
+            }
+            if ("email" in patch) {
+                set.push("email = ?");
+                args.push(patch.email ?? null);
+            }
+            if ("emailVerified" in patch) {
+                set.push("email_verified = ?");
+                args.push(patch.emailVerified ? 1 : 0);
+            }
+            if ("image" in patch) {
+                set.push("image = ?");
+                args.push(patch.image ?? null);
+            }
+            if ("isAnonymous" in patch) {
+                set.push("is_anonymous = ?");
+                args.push(patch.isAnonymous ? 1 : 0);
+            }
+            if ("extra" in patch) {
+                set.push("extra_json = ?");
+                args.push(patch.extra ? JSON.stringify(patch.extra) : null);
+            }
 
-        runSql(this.ctx.storage.sql, `UPDATE principal SET ${set.join(", ")}`, ...args);
-        const principal = this.findPrincipalOrThrow();
-        if (!principal.isAnonymous) {
-            this.enqueueAuthEvent("user", "upsert", principal);
-            await this.scheduleAuthFlush();
-        }
-        return principal;
+            runSql(this.ctx.storage.sql, `UPDATE principal SET ${set.join(", ")}`, ...args);
+            const principal = this.findPrincipalOrThrow();
+            if (!principal.isAnonymous) {
+                this.enqueueAuthEvent("user", "upsert", principal);
+                await this.scheduleAuthFlush();
+            }
+            return principal;
+        });
     }
 
     async deletePrincipal(): Promise<void> {
-        const before = await this.findPrincipal();
-        runSql(this.ctx.storage.sql, `DELETE FROM accounts`);
-        runSql(this.ctx.storage.sql, `DELETE FROM principal`);
-        if (before && !before.isAnonymous) {
-            this.enqueueAuthEvent("user", "delete", { id: before.id });
-            await this.scheduleAuthFlush();
-        }
+        return timed(this.log, "deletePrincipal", async () => {
+            const before = await this.findPrincipal();
+            runSql(this.ctx.storage.sql, `DELETE FROM accounts`);
+            runSql(this.ctx.storage.sql, `DELETE FROM principal`);
+            if (before && !before.isAnonymous) {
+                this.enqueueAuthEvent("user", "delete", { id: before.id });
+                await this.scheduleAuthFlush();
+            }
+        });
     }
 
     // ───── Accounts ──────────────────────────────────────────────────────
@@ -204,95 +227,117 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
     async createAccount(
         input: Omit<AccountRecord, "userId" | "createdAt" | "updatedAt"> & { userId: string }
     ): Promise<AccountRecord> {
-        const now = new Date().toISOString();
-        runSql(
-            this.ctx.storage.sql,
-            `INSERT INTO accounts
+        return timed(
+            this.log,
+            "createAccount",
+            async () => {
+                const now = new Date().toISOString();
+                runSql(
+                    this.ctx.storage.sql,
+                    `INSERT INTO accounts
          (id, provider_id, account_id, password, access_token, refresh_token, id_token,
           access_token_expires_at, refresh_token_expires_at, scope, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            input.id,
-            input.providerId,
-            input.accountId,
-            input.password ?? null,
-            input.accessToken ?? null,
-            input.refreshToken ?? null,
-            input.idToken ?? null,
-            input.accessTokenExpiresAt ?? null,
-            input.refreshTokenExpiresAt ?? null,
-            input.scope ?? null,
-            now,
-            now
+                    input.id,
+                    input.providerId,
+                    input.accountId,
+                    input.password ?? null,
+                    input.accessToken ?? null,
+                    input.refreshToken ?? null,
+                    input.idToken ?? null,
+                    input.accessTokenExpiresAt ?? null,
+                    input.refreshTokenExpiresAt ?? null,
+                    input.scope ?? null,
+                    now,
+                    now
+                );
+                const account = this.findAccountByIdOrThrow(input.id, input.userId);
+                this.enqueueAuthEvent("account", "upsert", account);
+                await this.scheduleAuthFlush();
+                return account;
+            },
+            { providerId: input.providerId, hasPassword: input.password != null }
         );
-        const account = this.findAccountByIdOrThrow(input.id, input.userId);
-        this.enqueueAuthEvent("account", "upsert", account);
-        await this.scheduleAuthFlush();
-        return account;
     }
 
     async findAccountById(id: string, userId: string): Promise<AccountRecord | null> {
-        const row = runSql(
-            this.ctx.storage.sql,
-            `SELECT * FROM accounts WHERE id = ? LIMIT 1`,
-            id
-        ).toArray()[0] as unknown as RawAccount | undefined;
-        return row ? toAccount(row, userId) : null;
+        return timed(this.log, "findAccountById", async () => {
+            const row = runSql(
+                this.ctx.storage.sql,
+                `SELECT * FROM accounts WHERE id = ? LIMIT 1`,
+                id
+            ).toArray()[0] as unknown as RawAccount | undefined;
+            return row ? toAccount(row, userId) : null;
+        });
     }
 
     async findAccountByProvider(providerId: string, accountId: string, userId: string): Promise<AccountRecord | null> {
-        const row = runSql(
-            this.ctx.storage.sql,
-            `SELECT * FROM accounts WHERE provider_id = ? AND account_id = ? LIMIT 1`,
-            providerId,
-            accountId
-        ).toArray()[0] as unknown as RawAccount | undefined;
-        return row ? toAccount(row, userId) : null;
+        return timed(
+            this.log,
+            "findAccountByProvider",
+            async () => {
+                const row = runSql(
+                    this.ctx.storage.sql,
+                    `SELECT * FROM accounts WHERE provider_id = ? AND account_id = ? LIMIT 1`,
+                    providerId,
+                    accountId
+                ).toArray()[0] as unknown as RawAccount | undefined;
+                return row ? toAccount(row, userId) : null;
+            },
+            { providerId }
+        );
     }
 
     async listAccounts(userId: string): Promise<AccountRecord[]> {
-        const rows = runSql(
-            this.ctx.storage.sql,
-            `SELECT * FROM accounts ORDER BY created_at`
-        ).toArray() as unknown as RawAccount[];
-        return rows.map(r => toAccount(r, userId));
+        return timed(this.log, "listAccounts", async () => {
+            const rows = runSql(
+                this.ctx.storage.sql,
+                `SELECT * FROM accounts ORDER BY created_at`
+            ).toArray() as unknown as RawAccount[];
+            return rows.map(r => toAccount(r, userId));
+        });
     }
 
     async updateAccount(id: string, patch: Partial<AccountRecord>, userId: string): Promise<AccountRecord | null> {
-        const now = new Date().toISOString();
-        const set: string[] = ["updated_at = ?"];
-        const args: (string | null)[] = [now];
+        return timed(this.log, "updateAccount", async () => {
+            const now = new Date().toISOString();
+            const set: string[] = ["updated_at = ?"];
+            const args: (string | null)[] = [now];
 
-        const allowed: Array<keyof AccountRecord> = [
-            "password",
-            "accessToken",
-            "refreshToken",
-            "idToken",
-            "accessTokenExpiresAt",
-            "refreshTokenExpiresAt",
-            "scope",
-        ];
-        for (const k of allowed) {
-            if (k in patch) {
-                set.push(`${camelToSnake(k)} = ?`);
-                args.push((patch[k] as string | null | undefined) ?? null);
+            const allowed: Array<keyof AccountRecord> = [
+                "password",
+                "accessToken",
+                "refreshToken",
+                "idToken",
+                "accessTokenExpiresAt",
+                "refreshTokenExpiresAt",
+                "scope",
+            ];
+            for (const k of allowed) {
+                if (k in patch) {
+                    set.push(`${camelToSnake(k)} = ?`);
+                    args.push((patch[k] as string | null | undefined) ?? null);
+                }
             }
-        }
-        if (set.length === 1) return this.findAccountById(id, userId);
+            if (set.length === 1) return this.findAccountById(id, userId);
 
-        args.push(id);
-        runSql(this.ctx.storage.sql, `UPDATE accounts SET ${set.join(", ")} WHERE id = ?`, ...args);
-        const account = await this.findAccountById(id, userId);
-        if (account) {
-            this.enqueueAuthEvent("account", "upsert", account);
-            await this.scheduleAuthFlush();
-        }
-        return account;
+            args.push(id);
+            runSql(this.ctx.storage.sql, `UPDATE accounts SET ${set.join(", ")} WHERE id = ?`, ...args);
+            const account = await this.findAccountById(id, userId);
+            if (account) {
+                this.enqueueAuthEvent("account", "upsert", account);
+                await this.scheduleAuthFlush();
+            }
+            return account;
+        });
     }
 
     async deleteAccount(id: string): Promise<void> {
-        runSql(this.ctx.storage.sql, `DELETE FROM accounts WHERE id = ?`, id);
-        this.enqueueAuthEvent("account", "delete", { id });
-        await this.scheduleAuthFlush();
+        return timed(this.log, "deleteAccount", async () => {
+            runSql(this.ctx.storage.sql, `DELETE FROM accounts WHERE id = ?`, id);
+            this.enqueueAuthEvent("account", "delete", { id });
+            await this.scheduleAuthFlush();
+        });
     }
 
     // ───── Recovery outbox + alarm ───────────────────────────────────────
@@ -340,10 +385,16 @@ export class UserDurableObject<Env extends UserDurableObjectEnv = UserDurableObj
         // itself catches per-event failures and re-queues with backoff;
         // this is the second layer of defense for catastrophic failures.
         let remaining = 0;
+        const t0 = Date.now();
         try {
             remaining = await this.drainAuthOutbox();
+            this.log.info("alarm_drain", { durationMs: Date.now() - t0, remaining, status: "ok" });
         } catch (err) {
-            console.error("UserDurableObject.alarm: drain threw", err);
+            this.log.error("alarm_drain", {
+                durationMs: Date.now() - t0,
+                status: "error",
+                error: (err as Error)?.message?.slice(0, 200) ?? "unknown",
+            });
             // Still reschedule so the next alarm retries.
             remaining = 1;
         }

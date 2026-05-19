@@ -28,7 +28,7 @@ export {
     type ReserveResult,
     type CommitResult,
 } from "./objects/IdentityDurableObject";
-export { createLogger, sha256Hex, shortHash, type Logger, type LogLevel } from "./logging";
+export { createLogger, timed, sha256Hex, shortHash, type Logger, type LogLevel } from "./logging";
 export { recordAdapterEvent, type AnalyticsRecorder } from "./telemetry/analytics";
 export { createOutboxFlush, type OutboxFlush, type OutboxEvent, type OutboxFlushConfig } from "./outbox";
 export { optionalBinding, requireBinding, resetOptionalBindingWarnings } from "./bindings";

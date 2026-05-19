@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useSession, signOut } from "@/lib/auth-client";
+import { useTiming } from "@/lib/timing";
 
 interface AdminUser {
     id: string;
@@ -15,6 +16,7 @@ interface AdminUser {
 export default function DashboardPage() {
     const { data: session, isPending } = useSession();
     const router = useRouter();
+    const { timed } = useTiming();
     const [users, setUsers] = useState<AdminUser[]>([]);
     const [loadingUsers, setLoadingUsers] = useState(false);
 
@@ -25,11 +27,10 @@ export default function DashboardPage() {
     useEffect(() => {
         if (!session) return;
         setLoadingUsers(true);
-        fetch("/admin/users?limit=20")
-            .then((r) => r.json())
-            .then((data) => setUsers(data.users ?? []))
+        timed("GET /admin/users", () => fetch("/admin/users?limit=20").then(r => r.json()))
+            .then((data: { users?: AdminUser[] }) => setUsers(data.users ?? []))
             .finally(() => setLoadingUsers(false));
-    }, [session]);
+    }, [session, timed]);
 
     if (isPending || !session) return <div className="text-sm text-gray-500">Loading…</div>;
 
@@ -42,9 +43,7 @@ export default function DashboardPage() {
                     <h1 className="text-3xl font-bold tracking-tight">Dashboard</h1>
                     <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
                         Signed in as{" "}
-                        <span className="font-medium">
-                            {session.user.email ?? session.user.name ?? "guest"}
-                        </span>
+                        <span className="font-medium">{session.user.email ?? session.user.name ?? "guest"}</span>
                         {isAnonymous && (
                             <span className="ml-2 inline-flex items-center rounded-full bg-amber-100 dark:bg-amber-900/50 px-2 py-0.5 text-xs font-medium text-amber-800 dark:text-amber-200">
                                 anonymous
@@ -54,7 +53,7 @@ export default function DashboardPage() {
                 </div>
                 <button
                     onClick={async () => {
-                        await signOut();
+                        await timed("sign-out", () => signOut());
                         router.push("/");
                     }}
                     className="rounded-md border border-gray-300 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 px-4 py-2 text-sm font-medium transition-colors"
@@ -100,7 +99,7 @@ export default function DashboardPage() {
                             </tr>
                         </thead>
                         <tbody>
-                            {users.map((u) => (
+                            {users.map(u => (
                                 <tr key={u.id} className="border-b border-gray-100 dark:border-gray-900 last:border-0">
                                     <td className="py-2 pr-4 font-mono text-xs">{u.email}</td>
                                     <td className="py-2 pr-4">{u.name ?? "—"}</td>

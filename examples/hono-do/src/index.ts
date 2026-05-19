@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { createAuth } from "./auth";
 import type { CloudflareBindings } from "./env";
+import { logRequest, getRequestId } from "better-auth-cloudflare";
 
 // REQUIRED: re-export the DO classes so Cloudflare can register them.
 // The `class_name` entries in wrangler.toml reference these symbols.
@@ -15,6 +16,25 @@ const app = new Hono<{ Bindings: CloudflareBindings; Variables: Variables }>();
 // based on the client's Accept-Encoding header (brotli > gzip). We do NOT
 // run server-side compression here — Hono's compress() would compress
 // unconditionally and break clients that don't advertise Accept-Encoding.
+
+// Per-request timing log. Emits a single info line per request with op
+// (= pathname), durationMs, status, colo, and country. Wrangler tail
+// + Cloudflare Workers Logs index by JSON keys, so dashboards can chart
+// p50/p95/p99 per op without changing this code.
+app.use("*", async (c, next) => {
+    const t0 = Date.now();
+    const cf = (c.req.raw as unknown as { cf?: Record<string, unknown> }).cf ?? {};
+    const requestId = getRequestId(c.req.raw);
+    await next();
+    logRequest({
+        requestId,
+        op: `${c.req.method} ${new URL(c.req.url).pathname}`,
+        durationMs: Date.now() - t0,
+        status: c.res.status,
+        colo: (cf.colo as string | undefined) ?? undefined,
+        country: (cf.country as string | undefined) ?? undefined,
+    });
+});
 
 // Cache headers per route family. Cloudflare honors these at the edge.
 //   /api/auth/*  → no-store (auth state must never be cached)

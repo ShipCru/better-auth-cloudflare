@@ -65,10 +65,30 @@ Demo implementations are available in the [`examples/`](./examples/) directory f
 - [ ] Cloudflare Email
 - [ ] Cloudflare Images
 - [ ] **KV read-cache layer for IdentityDO** — globally-cached email→principalId lookups (eliminates cross-region signin RPC). DO stays as the write oracle.
+- [ ] **Replace IdentityDO with D1 UNIQUE index** — current per-email-hash DO eats ~1-4s cold-start on every new signup. A D1 table with `UNIQUE (email_hash)` gives identical uniqueness guarantees with ~30-80ms cold reads and ~5ms warm. Make IdentityDO opt-in for users who prefer the no-DB-on-hot-path purity.
 - [ ] **Multi-database routing for residency** — pluggable per-region database bindings (EU / US / APAC), so EU auth data stays in EU D1 (or Postgres via Hyperdrive). Hard-stop residency boundary.
 - [ ] **Multi-database sharding within a region** — hash principal_id mod N across DB shards inside a jurisdiction. Supports growth beyond a single DB.
 - [ ] **Active DO dashboard** — read-only admin view of active principal DOs with location, region, and storage size
-- [ ] **Benchmark suite** — hot-path latency comparison across D1 / Hyperdrive / DO adapters, with geo-distributed test runners
+- [ ] **Hash-sharded UserDOs** — opt-in mode where principal_id → `userDo.idFromName("shard:" + hash(id) % N)` so cold starts amortize across many users. Trade-off: lose 1:1 principal:DO isolation; cap of ~256MB SQLite per shard.
+
+**Performance / observability:**
+
+- [x] **Structured per-method timing** _(ShipCru fork)_ — every DO RPC and adapter method emits `{op, durationMs, status}` via `timed(logger, op, fn)`. Visible in `wrangler tail --format=json` and Cloudflare Workers Logs.
+- [x] **Per-request log middleware** _(ShipCru fork)_ — one info line per Hono request with `{requestId, op, durationMs, status, colo, country}`. Indexable for p50/p95/p99 dashboards.
+- [x] **D1 query timing** _(ShipCru fork)_ — `d1AuthDataStore` wraps every prepare/run/all/first in `timed()`.
+- [x] **In-process freshness cache for create→findOne** _(ShipCru fork)_ — eliminates BA's post-create refetch DO RPC. Per-isolate map, 5s TTL, one-shot consume.
+- [x] **Skip IdentityDO pre-existence check on signup** _(ShipCru fork)_ — `findOne(user, email)` without `join.account` short-circuits; `reserve()` in create remains the authoritative uniqueness gate. Drops signup p95 from ~6s to ~3.5s.
+- [ ] **Extensive global benchmarking suite** — k6 / autocannon scenarios for anon-signin, email-signup, email-signin, get-session. Runners pinned to multiple Cloudflare colos (SJC, LHR, FRA, NRT, SYD) so we measure real geo latency, not local. Output: per-op p50/p95/p99 across regions, weekly-tracked.
+- [ ] **Global performance monitoring dashboard** — Cloudflare Analytics Engine + Grafana. Per-op SLO panels, error-budget burn rate, DO cold-start frequency, KV/D1 read tail latency by colo. Alerts wired to Cloudflare Notifications when p95 exceeds budget.
+- [ ] **Per-endpoint perf budgets** — declared in code (e.g., `sign-up/email: p95 < 1500ms`), enforced by the benchmark suite in CI. PRs blocked when a perf regression is detected.
+- [ ] **Configurable password-hash cost** — BA defaults to scrypt(N=16384, r=16, p=1), which costs ~1.5-3.5s of CPU on a Worker isolate. Expose `emailAndPassword.password.hash` overrides in the demo with documented presets (`secure` = BA default, `balanced` = N=4096, `fast` = bcrypt cost 10). Currently the single largest sub-second contributor on the warm signup path.
+- [ ] **Smart placement / `locationHint` on DO creation** — when `cf.continent` is available, pass `locationHint: "wnam" | "enam" | "weur" | …` to `idFromName()` so the DO is placed near the user on first write. Should reduce cold-start RTT for non-NA traffic.
+
+**Collaborative editing primitives (Glass / ShipCru-specific):**
+
+- [ ] **ResumeDurableObject** with WebSocket Hibernation API (`ctx.acceptWebSocket`). One DO per resume, holds canonical document, broadcasts edits to all connected sessions, hibernates when idle. Auth-gated via session cookie verification before `acceptWebSocket`. Op-log + periodic snapshot; CRDT-friendly (LWW or Yjs-compatible binary deltas).
+- [ ] **Presence / cursor sync** — extension of ResumeDO; broadcasts ephemeral cursor positions and user color via separate WS message kind, never written to storage.
+- [ ] **Multi-doc bulk-edit DO** — when one principal opens N resumes at once (typical for batch operations), share a single DO connection instead of N WebSockets.
 
 **CLI:**
 

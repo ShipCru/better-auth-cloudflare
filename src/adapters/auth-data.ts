@@ -1,6 +1,6 @@
 import type { D1Database } from "@cloudflare/workers-types";
 import type { PrincipalRecord, AccountRecord } from "../objects/UserDurableObject";
-import type { Logger } from "../logging";
+import { createLogger, timed, type Logger, type LogLevel } from "../logging";
 
 /**
  * Auth data store for the DO adapter.
@@ -62,12 +62,21 @@ CREATE TABLE IF NOT EXISTS accounts (
 CREATE INDEX IF NOT EXISTS accounts_user_idx ON accounts(user_id);
 `;
 
-export function d1AuthDataStore(db: D1Database): AuthDataStore {
+/**
+ * @param logLevel - Optional log level for D1 timing logs. Defaults to "info".
+ *                   Each D1 query emits a single info line: {op, durationMs, status}.
+ */
+export function d1AuthDataStore(db: D1Database, logLevel: LogLevel = "info"): AuthDataStore {
+    const log = createLogger({ scope: "d1-auth-data", level: logLevel });
     return {
         async writeUser(user) {
-            await db
-                .prepare(
-                    `INSERT INTO users (id, name, email, email_verified, image, is_anonymous, created_at, updated_at)
+            return timed(
+                log,
+                "d1.writeUser",
+                async () => {
+                    await db
+                        .prepare(
+                            `INSERT INTO users (id, name, email, email_verified, image, is_anonymous, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              name = excluded.name,
@@ -76,86 +85,104 @@ export function d1AuthDataStore(db: D1Database): AuthDataStore {
              image = excluded.image,
              is_anonymous = excluded.is_anonymous,
              updated_at = excluded.updated_at`
-                )
-                .bind(
-                    user.id,
-                    user.name,
-                    user.email,
-                    user.emailVerified ? 1 : 0,
-                    user.image,
-                    user.isAnonymous ? 1 : 0,
-                    user.createdAt,
-                    user.updatedAt
-                )
-                .run();
+                        )
+                        .bind(
+                            user.id,
+                            user.name,
+                            user.email,
+                            user.emailVerified ? 1 : 0,
+                            user.image,
+                            user.isAnonymous ? 1 : 0,
+                            user.createdAt,
+                            user.updatedAt
+                        )
+                        .run();
+                },
+                { isAnonymous: user.isAnonymous }
+            );
         },
 
         async writeAccount(account) {
-            await db
-                .prepare(
-                    `INSERT INTO accounts (id, user_id, provider_id, account_id, created_at, updated_at)
+            return timed(
+                log,
+                "d1.writeAccount",
+                async () => {
+                    await db
+                        .prepare(
+                            `INSERT INTO accounts (id, user_id, provider_id, account_id, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at`
-                )
-                .bind(
-                    account.id,
-                    account.userId,
-                    account.providerId,
-                    account.accountId,
-                    account.createdAt,
-                    account.updatedAt
-                )
-                .run();
+                        )
+                        .bind(
+                            account.id,
+                            account.userId,
+                            account.providerId,
+                            account.accountId,
+                            account.createdAt,
+                            account.updatedAt
+                        )
+                        .run();
+                },
+                { providerId: account.providerId }
+            );
         },
 
         async deleteUser(principalId) {
-            const now = new Date().toISOString();
-            await db
-                .prepare(`UPDATE users SET deleted_at = ?, updated_at = ? WHERE id = ?`)
-                .bind(now, now, principalId)
-                .run();
+            return timed(log, "d1.deleteUser", async () => {
+                const now = new Date().toISOString();
+                await db
+                    .prepare(`UPDATE users SET deleted_at = ?, updated_at = ? WHERE id = ?`)
+                    .bind(now, now, principalId)
+                    .run();
+            });
         },
 
         async deleteAccount(accountId) {
-            await db.prepare(`DELETE FROM accounts WHERE id = ?`).bind(accountId).run();
+            return timed(log, "d1.deleteAccount", async () => {
+                await db.prepare(`DELETE FROM accounts WHERE id = ?`).bind(accountId).run();
+            });
         },
 
         async readUser(principalId) {
-            const row = (await db
-                .prepare(`SELECT * FROM users WHERE id = ? AND deleted_at IS NULL`)
-                .bind(principalId)
-                .first()) as Record<string, unknown> | null;
-            if (!row) return null;
-            return {
-                id: String(row.id),
-                name: row.name as string | null,
-                email: row.email as string | null,
-                emailVerified: Number(row.email_verified) === 1,
-                image: row.image as string | null,
-                isAnonymous: Number(row.is_anonymous) === 1,
-                createdAt: String(row.created_at),
-                updatedAt: String(row.updated_at),
-            };
+            return timed(log, "d1.readUser", async () => {
+                const row = (await db
+                    .prepare(`SELECT * FROM users WHERE id = ? AND deleted_at IS NULL`)
+                    .bind(principalId)
+                    .first()) as Record<string, unknown> | null;
+                if (!row) return null;
+                return {
+                    id: String(row.id),
+                    name: row.name as string | null,
+                    email: row.email as string | null,
+                    emailVerified: Number(row.email_verified) === 1,
+                    image: row.image as string | null,
+                    isAnonymous: Number(row.is_anonymous) === 1,
+                    createdAt: String(row.created_at),
+                    updatedAt: String(row.updated_at),
+                };
+            });
         },
 
         async readAccountsForUser(principalId) {
-            const result = await db.prepare(`SELECT * FROM accounts WHERE user_id = ?`).bind(principalId).all();
-            const rows = (result.results ?? []) as Array<Record<string, unknown>>;
-            return rows.map(r => ({
-                id: String(r.id),
-                userId: String(r.user_id),
-                providerId: String(r.provider_id),
-                accountId: r.account_id as string,
-                password: null,
-                accessToken: null,
-                refreshToken: null,
-                idToken: null,
-                accessTokenExpiresAt: null,
-                refreshTokenExpiresAt: null,
-                scope: null,
-                createdAt: String(r.created_at),
-                updatedAt: String(r.updated_at),
-            }));
+            return timed(log, "d1.readAccountsForUser", async () => {
+                const result = await db.prepare(`SELECT * FROM accounts WHERE user_id = ?`).bind(principalId).all();
+                const rows = (result.results ?? []) as Array<Record<string, unknown>>;
+                return rows.map(r => ({
+                    id: String(r.id),
+                    userId: String(r.user_id),
+                    providerId: String(r.provider_id),
+                    accountId: r.account_id as string,
+                    password: null,
+                    accessToken: null,
+                    refreshToken: null,
+                    idToken: null,
+                    accessTokenExpiresAt: null,
+                    refreshTokenExpiresAt: null,
+                    scope: null,
+                    createdAt: String(r.created_at),
+                    updatedAt: String(r.updated_at),
+                }));
+            });
         },
     };
 }

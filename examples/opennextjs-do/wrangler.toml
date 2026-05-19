@@ -24,3 +24,11 @@ id = "YOUR_KV_NAMESPACE_ID"
 [[analytics_engine_datasets]]
 binding = "AUTH_ANALYTICS"
 dataset = "ba_cf_do_events"
+
+# Auth data store — DO outbox syncs writes here; admin dashboard queries
+# read from here. Wrangler local mode accepts the placeholder id and
+# creates an in-memory SQLite.
+[[d1_databases]]
+binding = "AUTH_DB"
+database_name = "ba-cf-do-recovery"
+database_id = "00000000-0000-0000-0000-000000000000"

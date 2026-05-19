@@ -1,70 +1,80 @@
-# DO adapter — Next.js (OpenNext) example
+# Next.js + OpenNext + Tailwind + DO adapter
 
-Same shape as [`examples/opennextjs`](../opennextjs/) but uses the `do`
-adapter option. No D1, no Hyperdrive. All auth state in Durable
-Objects on the hot path; sessions in KV via BA's `secondaryStorage`.
+Full React frontend for the DO-backed Better Auth flow. Replaces the
+Hono inline-HTML demo in `examples/hono-do/` with a proper Next.js app.
 
-## Status
+**Stack:** Next.js 15 (App Router) + React 19 + Tailwind v4 + OpenNext
+deploy target on Cloudflare Workers + the `do` adapter from this fork.
 
-**Scaffold only.** The auth + DB wiring (`src/auth/index.ts`, `src/db/index.ts`)
-is the working core — drop-in replacement for the equivalent files in
-`examples/opennextjs`. The UI, layout, dashboard, and protected pages
-are not duplicated here; **copy them verbatim from `examples/opennextjs`**.
-The auth flow doesn't change shape — only the storage layer underneath.
+## What's here
 
-## Migration recipe from `examples/opennextjs`
+| Route | Purpose |
+|---|---|
+| `/` | Home — signin / signup tabs, anonymous + Google buttons |
+| `/dashboard` | Post-auth view with session details + recent users from D1 |
+| `/api/auth/*` | BA catch-all handler |
+| `/admin/users` | D1-backed paginated user list (consumed by the dashboard) |
+
+All auth state lives in `UserDurableObject` + `IdentityDurableObject`.
+D1 (`AUTH_DB`) holds an eventually-consistent sync (DO outbox + alarm
++ waitUntil, ~10s bounded). Sessions go to KV via BA's secondaryStorage.
+
+## Local dev
 
 ```bash
-# 1. Start from the existing OpenNext example
-cp -R examples/opennextjs examples/opennextjs-do
+# From repo root: build the package first
+pnpm install && pnpm build
+
+# Now the demo
 cd examples/opennextjs-do
+pnpm install
 
-# 2. Replace auth + db config with the files in this directory
-cp ../opennextjs-do/src/auth/index.ts src/auth/index.ts
-cp ../opennextjs-do/src/db/index.ts src/db/index.ts
-rm -rf src/db/auth.schema.ts drizzle/  # no migrations needed for DO
+# Provision local resources
+wrangler kv namespace create KV          # paste id into wrangler.toml
+wrangler d1 execute ba-cf-do-recovery --local --file ../hono-do/auth-data-schema.sql
 
-# 3. Update wrangler.jsonc / wrangler.toml to add DO bindings (see this directory's wrangler.toml)
+# Optional: enable Google OAuth
+wrangler secret put GOOGLE_CLIENT_ID
+wrangler secret put GOOGLE_CLIENT_SECRET
 
-# 4. Add the DO export to the Worker entry — see "OpenNext gotcha" below
+# Next.js dev server (uses OpenNext's Cloudflare dev binding)
+pnpm dev
 ```
 
-## OpenNext gotcha: re-exporting DO classes
+Then visit http://localhost:3000.
 
-OpenNext generates the Worker entry file at build time. To register
-Durable Object classes, you must extend the generated entry:
+## Deploy
 
-```ts
-// .open-next/worker.ts (or your wrapper, see OpenNext docs)
-import { default as handler } from './worker.generated';
-export { UserDurableObject, IdentityDurableObject } from 'better-auth-cloudflare';
-export default handler;
+```bash
+pnpm deploy   # opennextjs-cloudflare build && deploy
 ```
 
-Or, if your wrangler.toml's `main` points at your own wrapper:
+OpenNext bundles Next.js into a single Cloudflare Worker. The DO classes
+are re-exported via `open-next.config.ts` so wrangler can register them.
 
-```ts
-// src/worker.ts
-import baseHandler from '@opennextjs/cloudflare/handler';
-export { UserDurableObject, IdentityDurableObject } from 'better-auth-cloudflare';
-export default baseHandler;
-```
+## Forgot password
 
-See the OpenNext-Cloudflare docs for the current recommended pattern:
-<https://opennext.js.org/cloudflare>.
+Wired in `src/lib/auth.ts` via BA's `sendResetPassword` callback. In dev,
+the reset URL is logged to the worker console. In production, hook this
+to your transactional email service.
 
-## What's in this directory
+The reset link goes to `/api/auth/reset-password` which BA handles.
 
-- `src/auth/index.ts` — DO-backed BA config (drop-in for the upstream version)
-- `src/db/index.ts` — no-op (the DO adapter doesn't need a DB client)
-- `wrangler.toml` — DO + KV bindings, no D1
-- `package.json` — same deps as upstream minus D1/Drizzle
-- (UI files — see Migration recipe above to copy from `examples/opennextjs`)
+## Google OAuth
 
-## Why this is scaffold-only
+Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` via `wrangler secret put`.
+Register the callback URL in Google Console:
+`https://your-worker-url/api/auth/callback/google`
 
-OpenNext's build pipeline + DO class registration is non-trivial to
-demonstrate without committing 30+ UI files that aren't materially
-different from the upstream example. Once the upstream OpenNext example
-is stable and the DO-export pattern is documented, this can become a
-full standalone demo.
+## What's NOT included
+
+- E2E tests — the Hono demo already covers them
+- Forgot password dedicated UI page — uses BA's default reset link flow
+- Theme switcher — Tailwind's `dark:` classes respond to OS preference
+- Admin auth on `/admin/users` — wrap in your own admin check for prod
+
+## Provenance
+
+Companion to `examples/opennextjs/` (D1-backed) — same UI shape but
+backed by DOs instead of D1 for the hot path. See the fork root
+[README](../../README.md) for the full architecture.

@@ -1,6 +1,6 @@
 import type { IncomingRequestCfProperties } from "@cloudflare/workers-types";
 import { betterAuth } from "better-auth";
-import { withCloudflare } from "better-auth-cloudflare";
+import { withCloudflare, d1RecoveryStore } from "better-auth-cloudflare";
 import { anonymous } from "better-auth/plugins";
 import type { CloudflareBindings } from "../env";
 
@@ -31,6 +31,13 @@ function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, 
                       userDo: env.USER_DO,
                       identityDo: env.IDENTITY_DO,
                       logLevel: "info",
+                      // Optional D1 recovery store. When AUTH_RECOVERY_DB is bound
+                      // (see wrangler.toml), every successful DO write is
+                      // one-way mirrored to D1 best-effort. The recovery store is
+                      // NEVER queried during auth flows — it exists only for DR.
+                      // Use recoverPrincipalFromRecoveryStore() to replay a
+                      // principal back into a DO that lost storage.
+                      recoveryStore: env.AUTH_RECOVERY_DB ? d1RecoveryStore(env.AUTH_RECOVERY_DB) : undefined,
                   }
                 : undefined,
             kv: env?.KV,

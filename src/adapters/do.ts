@@ -1,6 +1,7 @@
 import type { DurableObjectNamespace } from "@cloudflare/workers-types";
 import { createLogger, shortHash, type Logger } from "../logging";
 import type { PrincipalRecord, AccountRecord } from "../objects/UserDurableObject";
+import { bestEffortRecoveryWrite, type RecoveryStore } from "./recovery";
 
 /**
  * Better Auth adapter backed by per-principal Durable Objects.
@@ -30,6 +31,42 @@ export interface DOAdapterConfig {
     identityDo: DurableObjectNamespace;
     /** Optional log level; defaults to "info". */
     logLevel?: "debug" | "info" | "warn" | "error";
+    /**
+     * Optional request region metadata. When supplied, every adapter log line
+     * carries `requestColo`, `requestCountry`, `requestContinent` and `requestRegion`,
+     * making it possible to correlate user requests with the colo they hit and
+     * (via the DO id in the same log line) which DO instance served them.
+     *
+     * The DO's own physical colo is NOT directly introspectable from inside the
+     * DO — Cloudflare doesn't expose `state.colo`. Use the namespace-level
+     * Cloudflare dashboard (or per-deployment Analytics Engine queries) to see
+     * physical DO placement; the `requestColo` here tells you where the user
+     * hit the edge, which is a reasonable proxy when `locationHint` was set.
+     */
+    region?: RegionContext;
+    /**
+     * Optional recovery store. When supplied, every successful DO write is
+     * mirrored to it on a best-effort basis. Use
+     * `recoverPrincipalFromRecoveryStore` to replay back into the DO if
+     * its storage is lost.
+     *
+     * **The recovery store is one-way: DOs sync to it; it is NEVER queried
+     * during auth flows.** All sign-in / session-validate / find-user-by-
+     * email paths read from the DOs only. The recovery store exists for DR
+     * and admin restore — nothing else.
+     *
+     * Failures of recovery-store writes are logged but never throw. The
+     * primary auth flow must never block on the recovery layer. Use
+     * `d1RecoveryStore(env.DB)` for a D1-backed implementation.
+     */
+    recoveryStore?: RecoveryStore;
+}
+
+export interface RegionContext {
+    colo?: string | null;
+    country?: string | null;
+    continent?: string | null;
+    region?: string | null;
 }
 
 export interface WhereClause {
@@ -94,7 +131,16 @@ function unsupported(method: string, model: string, detail: string): never {
 export type DoAdapterFactory = (options: unknown) => Adapter;
 
 export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
-    const log: Logger = createLogger({ scope: "do-adapter", level: config.logLevel ?? "info" });
+    const baseLog: Logger = createLogger({ scope: "do-adapter", level: config.logLevel ?? "info" });
+    const regionMeta: Record<string, string | null> = config.region
+        ? {
+              requestColo: config.region.colo ?? null,
+              requestCountry: config.region.country ?? null,
+              requestContinent: config.region.continent ?? null,
+              requestRegion: config.region.region ?? null,
+          }
+        : {};
+    const log: Logger = baseLog.child("ops", regionMeta);
     const userStub = (principalId: string) => config.userDo.get(config.userDo.idFromName(principalId));
     const identityStub = (emailHash: string) =>
         config.identityDo.get(config.identityDo.idFromName(`identity:${emailHash}`));
@@ -128,6 +174,11 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                         refreshTokenExpiresAt: serialiseDate(data.refreshTokenExpiresAt),
                         scope: (data.scope as string | undefined) ?? null,
                     });
+                    if (config.recoveryStore) {
+                        await bestEffortRecoveryWrite(log, "writeAccount", () =>
+                            config.recoveryStore!.writeAccount(account as AccountRecord)
+                        );
+                    }
                     return mapAccountToBA(account) as never;
                 }
                 unsupported("create", model, "use BA secondaryStorage for session/verification");
@@ -240,6 +291,9 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                         emailVerified: update.emailVerified as boolean | undefined,
                         image: update.image as string | undefined,
                     })) as PrincipalRecord;
+                    if (config.recoveryStore) {
+                        await bestEffortRecoveryWrite(log, "writeUser", () => config.recoveryStore!.writeUser(p));
+                    }
                     return mapPrincipalToBA(p) as never;
                 }
 
@@ -284,6 +338,9 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                     }
                     // @ts-expect-error
                     await stub.deletePrincipal();
+                    if (config.recoveryStore) {
+                        await bestEffortRecoveryWrite(log, "deleteUser", () => config.recoveryStore!.deleteUser(id));
+                    }
                     return;
                 }
 
@@ -347,6 +404,10 @@ async function createUser(
             email: null,
             isAnonymous: true,
         })) as PrincipalRecord;
+        // Anonymous users are intentionally NOT mirrored to the fallback.
+        // They are ephemeral; replicating them inflates the fallback store
+        // with users that mostly never convert. If you need them in your
+        // recovery store, mirror explicitly downstream.
         return mapPrincipalToBA(p);
     }
 
@@ -385,7 +446,11 @@ async function createUser(
         if (!commit.ok) {
             // @ts-expect-error
             await userStub.deletePrincipal();
+            // fall through to throw below — no fallback write if commit failed
             throw new Error(`do-adapter: identity commit failed (${commit.reason})`);
+        }
+        if (config.recoveryStore) {
+            await bestEffortRecoveryWrite(log, "writeUser", () => config.recoveryStore!.writeUser(p));
         }
         return mapPrincipalToBA(p);
     } catch (err) {

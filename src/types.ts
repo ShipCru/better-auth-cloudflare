@@ -103,6 +103,18 @@ export interface DOConfig {
     identityDo: DurableObjectNamespace;
     /** Log level for adapter operations. @default "info" */
     logLevel?: "debug" | "info" | "warn" | "error";
+    /**
+     * Optional explicit request region. When supplied (or when `withCloudflare`
+     * threads it through from the top-level `cf` option), every adapter log
+     * line and telemetry event carries the colo / country / continent / region
+     * the request hit. Useful for correlating user traffic with DO placement.
+     */
+    region?: {
+        colo?: string | null;
+        country?: string | null;
+        continent?: string | null;
+        region?: string | null;
+    };
 }
 
 /**
@@ -159,6 +171,7 @@ export interface CloudflareGeolocation {
     timezone?: string | null;
     city?: string | null;
     country?: string | null;
+    continent?: string | null;
     region?: string | null;
     regionCode?: string | null;
     colo?: string | null;

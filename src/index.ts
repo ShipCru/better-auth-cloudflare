@@ -14,6 +14,8 @@ export * from "./schema";
 export * from "./types";
 export * from "./r2";
 export { createDoAdapter, type Adapter, type DOAdapterConfig, type WhereClause } from "./adapters/do";
+export { d1RecoveryStore, RECOVERY_D1_SCHEMA, type RecoveryStore } from "./adapters/recovery";
+export { recoverPrincipalFromRecoveryStore } from "./adapters/recover";
 export {
     UserDurableObject,
     USER_DO_SCHEMA,
@@ -234,7 +236,24 @@ export const withCloudflare = <T extends BetterAuthOptions>(
         // Durable Object adapter — hot path reads/writes go to per-principal
         // SQLite-backed DOs. No database call on any user-facing request.
         // Pair with `kv` for session and verification storage.
-        database = createDoAdapter(cloudFlareOptions.do);
+        //
+        // If `cf` was supplied to withCloudflare, thread the request region
+        // metadata through so every adapter log line and telemetry event
+        // carries `requestColo`, `requestCountry`, `requestContinent`,
+        // `requestRegion`. Useful for debugging routing, residency, and
+        // for the active-DO dashboard.
+        const cfSync = cloudFlareOptions.cf && !(cloudFlareOptions.cf instanceof Promise) ? cloudFlareOptions.cf : null;
+        database = createDoAdapter({
+            ...cloudFlareOptions.do,
+            region: cfSync
+                ? {
+                      colo: cfSync.colo ?? null,
+                      country: cfSync.country ?? null,
+                      continent: cfSync.continent ?? null,
+                      region: cfSync.region ?? null,
+                  }
+                : cloudFlareOptions.do.region,
+        });
     } else if (cloudFlareOptions.postgres) {
         database = drizzleAdapter(cloudFlareOptions.postgres.db, {
             provider: "pg",

@@ -25,7 +25,28 @@ new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
 binding = "KV"
 id = "YOUR_KV_NAMESPACE_ID"
 
+
 # Optional: Analytics Engine for testing/debugging telemetry
 [[analytics_engine_datasets]]
 binding = "AUTH_ANALYTICS"
 dataset = "ba_cf_do_events"
+
+# Optional: D1 recovery store. When this binding is present (and wired in
+# auth/index.ts via `recoveryStore: d1RecoveryStore(env.AUTH_RECOVERY_DB)`),
+# every successful DO write is one-way mirrored to D1 on a best-effort basis.
+# The recovery store is NEVER queried during auth flows — auth lookups
+# always go through the DOs. The store exists for DR only.
+# Use `recoverPrincipalFromRecoveryStore({ userDo, recoveryStore, principalId })`
+# to replay back into the DO on storage loss.
+#
+# Setup (one-time):
+#   wrangler d1 create ba-cf-do-recovery
+#   # paste the id below
+#   wrangler d1 execute ba-cf-do-recovery --remote --file ./recovery-schema.sql
+#
+# Uncomment and fill in the id to enable:
+#
+# [[d1_databases]]
+# binding = "AUTH_RECOVERY_DB"
+# database_name = "ba-cf-do-recovery"
+# database_id = "YOUR_D1_DATABASE_ID"

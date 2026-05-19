@@ -1,50 +1,89 @@
-import { Hono } from 'hono';
-import { cors } from 'hono/cors';
-import { createAuth } from './auth';
-import type { CloudflareBindings } from './env';
+import { Hono } from "hono";
+import { cors } from "hono/cors";
+import { createAuth } from "./auth";
+import type { CloudflareBindings } from "./env";
 
 // REQUIRED: re-export the DO classes so Cloudflare can register them.
 // The `class_name` entries in wrangler.toml reference these symbols.
-export { UserDurableObject, IdentityDurableObject } from 'better-auth-cloudflare';
+export { UserDurableObject, IdentityDurableObject } from "better-auth-cloudflare";
 
 type Variables = { auth: ReturnType<typeof createAuth> };
 
 const app = new Hono<{ Bindings: CloudflareBindings; Variables: Variables }>();
 
 app.use(
-  '/api/auth/**',
-  cors({
-    origin: (origin) => origin ?? '*',
-    allowHeaders: ['Content-Type', 'Authorization'],
-    allowMethods: ['POST', 'GET', 'OPTIONS'],
-    credentials: true,
-  }),
+    "/api/auth/**",
+    cors({
+        origin: origin => origin ?? "*",
+        allowHeaders: ["Content-Type", "Authorization"],
+        allowMethods: ["POST", "GET", "OPTIONS"],
+        credentials: true,
+    })
 );
 
-app.use('*', async (c, next) => {
-  const cf = (c.req.raw as unknown as { cf?: unknown }).cf ?? {};
-  const auth = createAuth(c.env, cf as Parameters<typeof createAuth>[1], new URL(c.req.url).origin);
-  c.set('auth', auth);
-  await next();
+app.use("*", async (c, next) => {
+    const cf = (c.req.raw as unknown as { cf?: unknown }).cf ?? {};
+    const auth = createAuth(c.env, cf as Parameters<typeof createAuth>[1], new URL(c.req.url).origin);
+    c.set("auth", auth);
+    await next();
 });
 
-app.all('/api/auth/*', async (c) => c.get('auth').handler(c.req.raw));
+app.all("/api/auth/*", async c => c.get("auth").handler(c.req.raw));
 
-app.get('/protected', async (c) => {
-  const session = await c.get('auth').api.getSession({ headers: c.req.raw.headers });
-  if (!session) return c.json({ ok: false, reason: 'unauthenticated' }, 401);
-  return c.json({
-    ok: true,
-    userId: session.user.id,
-    sessionId: session.session.id,
-    isAnonymous: (session.user as { isAnonymous?: boolean }).isAnonymous ?? false,
-    storedIn: 'durable-object',
-  });
+app.get("/protected", async c => {
+    const session = await c.get("auth").api.getSession({ headers: c.req.raw.headers });
+    if (!session) return c.json({ ok: false, reason: "unauthenticated" }, 401);
+    return c.json({
+        ok: true,
+        userId: session.user.id,
+        sessionId: session.session.id,
+        isAnonymous: (session.user as { isAnonymous?: boolean }).isAnonymous ?? false,
+        storedIn: "durable-object",
+    });
 });
 
-app.get('/health', (c) => c.json({ status: 'ok' }));
+app.get("/health", c => c.json({ status: "ok" }));
 
-app.get('/', (c) => c.html(HOME_PAGE));
+/**
+ * Dev-only metadata endpoint. Surfaces the Cloudflare request region (where
+ * the user hit the edge), the resolved principal id (= DO name for this
+ * principal), and bindings available at the Worker. Useful for debugging
+ * routing, residency, and for the active-DO dashboard. Safe to leave on in
+ * production.
+ *
+ * Note: a DO's own physical colo is not directly introspectable from inside
+ * the DO. Use Cloudflare's namespace metrics dashboard for placement. The
+ * request colo + principalId together are enough to correlate traffic with
+ * DO instances in your logs.
+ */
+app.get("/debug/region", async c => {
+    const cf = (c.req.raw as unknown as { cf?: Record<string, unknown> }).cf ?? {};
+    const session = await c.get("auth").api.getSession({ headers: c.req.raw.headers });
+    const principalId = session?.user?.id ?? null;
+    return c.json({
+        request: {
+            colo: cf.colo ?? null,
+            country: cf.country ?? null,
+            continent: cf.continent ?? null,
+            region: cf.region ?? null,
+            regionCode: cf.regionCode ?? null,
+            city: cf.city ?? null,
+            timezone: cf.timezone ?? null,
+            latitude: cf.latitude ?? null,
+            longitude: cf.longitude ?? null,
+        },
+        principal: principalId
+            ? {
+                  id: principalId,
+                  doNamespace: "USER_DO",
+                  doName: principalId,
+                  isAnonymous: (session?.user as { isAnonymous?: boolean })?.isAnonymous ?? false,
+              }
+            : null,
+    });
+});
+
+app.get("/", c => c.html(HOME_PAGE));
 
 export default app;
 
@@ -54,6 +93,7 @@ const HOME_PAGE = `<!DOCTYPE html>
   <title>better-auth-cloudflare DO demo (Hono)</title>
   <style>
     body { font-family: system-ui; max-width: 640px; margin: 0 auto; padding: 24px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
     .card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 24px; margin: 16px 0; }
     button { padding: 8px 16px; margin: 6px 4px; border: 1px solid #d1d5db; border-radius: 4px; cursor: pointer; background: white; }
     .primary { background: #2563eb; color: white; border-color: #2563eb; }
@@ -71,6 +111,12 @@ const HOME_PAGE = `<!DOCTYPE html>
     <p class="badge">Storage: Durable Objects (no D1, no Hyperdrive)</p>
 
     <div id="status">Loading…</div>
+
+    <div id="op-meter" style="display:none; padding:8px 12px; margin:12px 0; border-radius:6px; background:#fef3c7; color:#92400e; font-size:0.85rem;">
+      <span id="op-label">…</span>
+      <span id="op-spinner" style="display:inline-block; width:10px; height:10px; border:2px solid #92400e; border-top-color:transparent; border-radius:50%; animation:spin 0.6s linear infinite; margin-left:6px; vertical-align:middle;"></span>
+      <span id="op-timing" style="margin-left:12px; color:#1f2937; display:none;"></span>
+    </div>
 
     <div id="not-logged-in" style="display:none;">
       <button id="btn-anon" class="primary">Continue as guest</button>
@@ -101,11 +147,56 @@ const HOME_PAGE = `<!DOCTYPE html>
     </div>
 
     <div id="protected-result"></div>
+
+    <details style="margin-top: 24px;">
+      <summary style="cursor: pointer; font-size: 0.9rem; color: #6b7280;">Dev metadata (request region + DO)</summary>
+      <div id="debug-region" style="margin-top: 12px;">
+        <button id="btn-refresh-debug" style="font-size: 0.85rem;">Refresh</button>
+        <pre id="debug-region-pre" style="margin-top: 8px;">click Refresh</pre>
+      </div>
+    </details>
   </div>
 
   <script>
     function $(id) { return document.getElementById(id); }
     let currentUser = null;
+
+    // Wraps an async fn with: visible op label, spinner during, response
+    // time after. Errors are surfaced in the meter and re-thrown.
+    async function timed(label, fn) {
+      const meter = $('op-meter');
+      const lab = $('op-label');
+      const spin = $('op-spinner');
+      const tim = $('op-timing');
+      meter.style.display = 'block';
+      meter.style.background = '#fef3c7';
+      meter.style.color = '#92400e';
+      lab.textContent = label + '…';
+      spin.style.display = 'inline-block';
+      tim.style.display = 'none';
+      const t0 = performance.now();
+      try {
+        const r = await fn();
+        const ms = Math.round(performance.now() - t0);
+        lab.textContent = label + ' ✓';
+        meter.style.background = '#dcfce7';
+        meter.style.color = '#166534';
+        spin.style.display = 'none';
+        tim.textContent = ms + ' ms';
+        tim.style.display = 'inline';
+        return r;
+      } catch (err) {
+        const ms = Math.round(performance.now() - t0);
+        lab.textContent = label + ' ✗ ' + (err && err.message ? err.message : 'error');
+        meter.style.background = '#fee2e2';
+        meter.style.color = '#991b1b';
+        spin.style.display = 'none';
+        tim.textContent = ms + ' ms';
+        tim.style.display = 'inline';
+        throw err;
+      }
+    }
+
     function row(parent, label, value) {
       const d = document.createElement('div'); d.className = 'info-row';
       const l = document.createElement('span'); l.className = 'label'; l.textContent = label + ':'; d.appendChild(l);
@@ -113,7 +204,7 @@ const HOME_PAGE = `<!DOCTYPE html>
       parent.appendChild(d);
     }
     async function check() {
-      const r = await fetch('/api/auth/get-session', { credentials: 'include' });
+      const r = await timed('get-session', () => fetch('/api/auth/get-session', { credentials: 'include' }));
       if (r.ok) { const d = await r.json(); if (d && d.user) { currentUser = d.user; return show(); } }
       $('status').textContent = 'Status: signed out';
       $('not-logged-in').style.display = 'block';
@@ -138,10 +229,15 @@ const HOME_PAGE = `<!DOCTYPE html>
       } catch {}
     }
     async function api(path, body) {
-      const r = await fetch(path, { method: 'POST', credentials: 'include',
-        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
-      if (!r.ok) throw new Error(path + ' failed: ' + r.status);
-      return r;
+      return timed(path, async () => {
+        const r = await fetch(path, { method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+        if (!r.ok) {
+          const text = await r.text().catch(() => '');
+          throw new Error(path + ' failed: ' + r.status + (text ? ' — ' + text.slice(0, 80) : ''));
+        }
+        return r;
+      });
     }
     document.addEventListener('DOMContentLoaded', () => {
       $('btn-anon').addEventListener('click', async () => { await api('/api/auth/sign-in/anonymous'); check(); });
@@ -156,11 +252,16 @@ const HOME_PAGE = `<!DOCTYPE html>
         catch (err) { alert(err.message); }
       });
       $('btn-protected').addEventListener('click', async () => {
-        const r = await fetch('/protected', { credentials: 'include' });
+        const r = await timed('/protected', () => fetch('/protected', { credentials: 'include' }));
         const d = await r.json(); const c = $('protected-result'); c.textContent = '';
         const pre = document.createElement('pre'); pre.textContent = JSON.stringify(d, null, 2); c.appendChild(pre);
       });
       $('btn-signout').addEventListener('click', async () => { await api('/api/auth/sign-out'); currentUser = null; check(); $('protected-result').textContent = ''; });
+      $('btn-refresh-debug').addEventListener('click', async () => {
+        const r = await timed('/debug/region', () => fetch('/debug/region', { credentials: 'include' }));
+        const d = await r.json();
+        $('debug-region-pre').textContent = JSON.stringify(d, null, 2);
+      });
       check();
     });
   </script>

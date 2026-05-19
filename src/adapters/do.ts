@@ -1,0 +1,356 @@
+import type { DurableObjectNamespace } from '@cloudflare/workers-types';
+import { createLogger, shortHash, type Logger } from '../logging';
+import type { PrincipalRecord, AccountRecord } from '../objects/UserDurableObject';
+
+/**
+ * Better Auth adapter backed by per-principal Durable Objects.
+ *
+ * Routing:
+ *   - `user` model  → IdentityDurableObject (for email lookup) +
+ *                     UserDurableObject (per principal_id)
+ *   - `account` model → UserDurableObject (by userId)
+ *   - `session` / `verification` → handled by BA `secondaryStorage`
+ *     (typically Cloudflare KV). The adapter throws if asked for them.
+ *
+ * Designed to be passed to BA's `adapter` field via the upstream
+ * `withCloudflare({ do: { ... } }, ...)` option. Users can also use it
+ * stand-alone:
+ *
+ * ```ts
+ * import { createDoAdapter } from 'better-auth-cloudflare';
+ * betterAuth({
+ *   database: createDoAdapter({ userDo: env.USER_DO, identityDo: env.IDENTITY_DO }),
+ *   ...
+ * });
+ * ```
+ */
+
+export interface DOAdapterConfig {
+  userDo: DurableObjectNamespace;
+  identityDo: DurableObjectNamespace;
+  /** Optional log level; defaults to "info". */
+  logLevel?: 'debug' | 'info' | 'warn' | 'error';
+}
+
+export interface WhereClause {
+  field: string;
+  value: unknown;
+  operator?: string;
+  connector?: 'AND' | 'OR';
+}
+
+export interface Adapter {
+  id: string;
+  create<T = Record<string, unknown>>(args: { model: string; data: Record<string, unknown> }): Promise<T>;
+  findOne<T = Record<string, unknown>>(args: { model: string; where: WhereClause[] }): Promise<T | null>;
+  findMany<T = Record<string, unknown>>(args: { model: string; where?: WhereClause[]; limit?: number; offset?: number }): Promise<T[]>;
+  update<T = Record<string, unknown>>(args: { model: string; where: WhereClause[]; update: Record<string, unknown> }): Promise<T | null>;
+  updateMany(args: { model: string; where: WhereClause[]; update: Record<string, unknown> }): Promise<number>;
+  delete(args: { model: string; where: WhereClause[] }): Promise<void>;
+  deleteMany(args: { model: string; where: WhereClause[] }): Promise<number>;
+  count(args: { model: string; where?: WhereClause[] }): Promise<number>;
+}
+
+const encoder = new TextEncoder();
+
+async function hashEmail(email: string): Promise<string> {
+  const normalised = email.trim().toLowerCase();
+  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(normalised));
+  const bytes = new Uint8Array(digest);
+  let out = '';
+  for (const b of bytes) out += b.toString(16).padStart(2, '0');
+  return out;
+}
+
+function pickWhere(where: WhereClause[], field: string): unknown {
+  return where.find((w) => w.field === field)?.value;
+}
+
+function unsupported(method: string, model: string, detail: string): never {
+  throw new Error(`do-adapter: ${method} on model '${model}' not supported (${detail})`);
+}
+
+export function createDoAdapter(config: DOAdapterConfig): Adapter {
+  const log: Logger = createLogger({ scope: 'do-adapter', level: config.logLevel ?? 'info' });
+  const userStub = (principalId: string) => config.userDo.get(config.userDo.idFromName(principalId));
+  const identityStub = (emailHash: string) => config.identityDo.get(config.identityDo.idFromName(`identity:${emailHash}`));
+
+  return {
+    id: 'durable-object',
+
+    async create({ model, data }) {
+      log.debug('create', { model, fields: Object.keys(data) });
+
+      if (model === 'user') {
+        return (await createUser(config, data, log)) as never;
+      }
+      if (model === 'account') {
+        const userId = data.userId as string;
+        if (!userId) unsupported('create', model, 'missing userId');
+        const stub = userStub(userId);
+        const id = (data.id as string) ?? crypto.randomUUID();
+        // @ts-expect-error — DO RPC method
+        const account = await stub.createAccount({
+          id,
+          userId,
+          providerId: data.providerId as string,
+          accountId: (data.accountId as string) ?? id,
+          password: (data.password as string | undefined) ?? null,
+          accessToken: (data.accessToken as string | undefined) ?? null,
+          refreshToken: (data.refreshToken as string | undefined) ?? null,
+          idToken: (data.idToken as string | undefined) ?? null,
+          accessTokenExpiresAt: serialiseDate(data.accessTokenExpiresAt),
+          refreshTokenExpiresAt: serialiseDate(data.refreshTokenExpiresAt),
+          scope: (data.scope as string | undefined) ?? null,
+        });
+        return mapAccountToBA(account) as never;
+      }
+      unsupported('create', model, 'use BA secondaryStorage for session/verification');
+    },
+
+    async findOne({ model, where }) {
+      log.debug('findOne', { model, fields: where.map((w) => w.field) });
+
+      if (model === 'user') {
+        const id = pickWhere(where, 'id');
+        if (typeof id === 'string') {
+          const stub = userStub(id);
+          // @ts-expect-error
+          const p = (await stub.findPrincipal()) as PrincipalRecord | null;
+          return p ? (mapPrincipalToBA(p) as never) : null;
+        }
+        const email = pickWhere(where, 'email');
+        if (typeof email === 'string') {
+          const emailHash = await hashEmail(email);
+          const idStub = identityStub(emailHash);
+          // @ts-expect-error
+          const lookup = (await idStub.lookup(emailHash)) as { principalId: string } | null;
+          if (!lookup) return null;
+          const stub = userStub(lookup.principalId);
+          // @ts-expect-error
+          const p = (await stub.findPrincipal()) as PrincipalRecord | null;
+          return p ? (mapPrincipalToBA(p) as never) : null;
+        }
+        unsupported('findOne', model, 'only `id` or `email` where-clauses supported');
+      }
+
+      if (model === 'account') {
+        const userId = pickWhere(where, 'userId');
+        if (typeof userId !== 'string') unsupported('findOne', model, 'userId required to route to UserDO');
+        const stub = userStub(userId);
+        const id = pickWhere(where, 'id');
+        const providerId = pickWhere(where, 'providerId');
+        const accountId = pickWhere(where, 'accountId');
+        if (typeof id === 'string') {
+          // @ts-expect-error
+          const a = (await stub.findAccountById(id, userId)) as AccountRecord | null;
+          return a ? (mapAccountToBA(a) as never) : null;
+        }
+        if (typeof providerId === 'string' && typeof accountId === 'string') {
+          // @ts-expect-error
+          const a = (await stub.findAccountByProvider(providerId, accountId, userId)) as AccountRecord | null;
+          return a ? (mapAccountToBA(a) as never) : null;
+        }
+        unsupported('findOne', model, 'provide id or (providerId + accountId)');
+      }
+
+      unsupported('findOne', model, 'unsupported model');
+    },
+
+    async findMany({ model, where }) {
+      log.debug('findMany', { model, fields: (where ?? []).map((w) => w.field) });
+
+      if (model === 'account') {
+        const userId = pickWhere(where ?? [], 'userId');
+        if (typeof userId !== 'string') unsupported('findMany', model, 'userId required');
+        const stub = userStub(userId);
+        // @ts-expect-error
+        const accounts = (await stub.listAccounts(userId)) as AccountRecord[];
+        return accounts.map(mapAccountToBA) as never;
+      }
+      unsupported('findMany', model, 'unsupported model');
+    },
+
+    async update({ model, where, update }) {
+      log.debug('update', { model, fields: Object.keys(update) });
+
+      if (model === 'user') {
+        const id = pickWhere(where, 'id');
+        if (typeof id !== 'string') unsupported('update', model, 'id required');
+        const stub = userStub(id);
+        // @ts-expect-error
+        const p = (await stub.updatePrincipal({
+          name: update.name as string | undefined,
+          email: update.email as string | undefined,
+          emailVerified: update.emailVerified as boolean | undefined,
+          image: update.image as string | undefined,
+        })) as PrincipalRecord;
+        return mapPrincipalToBA(p) as never;
+      }
+
+      if (model === 'account') {
+        const id = pickWhere(where, 'id');
+        const userId = pickWhere(where, 'userId') ?? update.userId;
+        if (typeof id !== 'string' || typeof userId !== 'string') {
+          unsupported('update', model, 'id and userId required');
+        }
+        const stub = userStub(userId);
+        // @ts-expect-error
+        const a = (await stub.updateAccount(id, update as Partial<AccountRecord>, userId)) as AccountRecord | null;
+        return a ? (mapAccountToBA(a) as never) : null;
+      }
+
+      unsupported('update', model, 'unsupported model');
+    },
+
+    async updateMany(_args) {
+      throw new Error('do-adapter: updateMany not supported');
+    },
+
+    async delete({ model, where }) {
+      log.debug('delete', { model });
+
+      if (model === 'user') {
+        const id = pickWhere(where, 'id');
+        if (typeof id !== 'string') unsupported('delete', model, 'id required');
+        const stub = userStub(id);
+        // @ts-expect-error
+        const principal = (await stub.findPrincipal()) as PrincipalRecord | null;
+        if (principal?.email) {
+          const emailHash = await hashEmail(principal.email);
+          const idStub = identityStub(emailHash);
+          // @ts-expect-error
+          await idStub.disable(emailHash);
+          log.info('identity disabled on user delete', { emailHash: await shortHash(emailHash) });
+        }
+        // @ts-expect-error
+        await stub.deletePrincipal();
+        return;
+      }
+
+      if (model === 'account') {
+        const id = pickWhere(where, 'id');
+        const userId = pickWhere(where, 'userId');
+        if (typeof id !== 'string' || typeof userId !== 'string') {
+          unsupported('delete', model, 'id and userId required');
+        }
+        const stub = userStub(userId);
+        // @ts-expect-error
+        await stub.deleteAccount(id);
+        return;
+      }
+
+      unsupported('delete', model, 'unsupported model');
+    },
+
+    async deleteMany(_args) {
+      throw new Error('do-adapter: deleteMany not supported');
+    },
+
+    async count(_args) {
+      throw new Error('do-adapter: count not supported (DOs are not indexed by aggregate; use the projection store)');
+    },
+  };
+}
+
+// ───── helpers: signup + mapping ───────────────────────────────────────
+
+async function createUser(config: DOAdapterConfig, data: Record<string, unknown>, log: Logger): Promise<Record<string, unknown>> {
+  const isAnonymous = data.isAnonymous === true || !data.email;
+  const principalId = (data.id as string) ?? crypto.randomUUID();
+  const userStub = config.userDo.get(config.userDo.idFromName(principalId));
+
+  if (isAnonymous) {
+    log.info('createUser anonymous', { principalIdShort: await shortHash(principalId) });
+    // @ts-expect-error
+    const p = (await userStub.createPrincipal({
+      id: principalId,
+      name: (data.name as string) ?? null,
+      email: null,
+      isAnonymous: true,
+    })) as PrincipalRecord;
+    return mapPrincipalToBA(p);
+  }
+
+  const email = data.email as string;
+  const emailHash = await hashEmail(email);
+  const idStub = config.identityDo.get(config.identityDo.idFromName(`identity:${emailHash}`));
+
+  log.info('createUser email', { emailHashShort: await shortHash(emailHash) });
+
+  // @ts-expect-error
+  const reserveResult = (await idStub.reserve(emailHash)) as
+    | { ok: true; reservationId: string }
+    | { ok: false; reason: string; principalId?: string | null };
+
+  if (!reserveResult.ok) {
+    log.warn('createUser email_taken_or_disabled', {
+      reason: reserveResult.reason,
+      emailHashShort: await shortHash(emailHash),
+    });
+    throw new Error(reserveResult.reason === 'disabled' ? 'EMAIL_DISABLED' : 'EMAIL_ALREADY_EXISTS');
+  }
+
+  try {
+    // @ts-expect-error
+    const p = (await userStub.createPrincipal({
+      id: principalId,
+      name: (data.name as string) ?? null,
+      email,
+      emailVerified: (data.emailVerified as boolean) ?? false,
+      image: (data.image as string) ?? null,
+    })) as PrincipalRecord;
+    // @ts-expect-error
+    const commit = (await idStub.commit(emailHash, reserveResult.reservationId, principalId)) as
+      | { ok: true }
+      | { ok: false; reason: string };
+    if (!commit.ok) {
+      // @ts-expect-error
+      await userStub.deletePrincipal();
+      throw new Error(`do-adapter: identity commit failed (${commit.reason})`);
+    }
+    return mapPrincipalToBA(p);
+  } catch (err) {
+    // @ts-expect-error
+    await idStub.release(emailHash, reserveResult.reservationId).catch(() => {});
+    throw err;
+  }
+}
+
+function mapPrincipalToBA(p: PrincipalRecord): Record<string, unknown> {
+  return {
+    id: p.id,
+    name: p.name,
+    email: p.email,
+    emailVerified: p.emailVerified,
+    image: p.image,
+    isAnonymous: p.isAnonymous,
+    createdAt: new Date(p.createdAt),
+    updatedAt: new Date(p.updatedAt),
+  };
+}
+
+function mapAccountToBA(a: AccountRecord): Record<string, unknown> {
+  return {
+    id: a.id,
+    userId: a.userId,
+    providerId: a.providerId,
+    accountId: a.accountId,
+    password: a.password,
+    accessToken: a.accessToken,
+    refreshToken: a.refreshToken,
+    idToken: a.idToken,
+    accessTokenExpiresAt: a.accessTokenExpiresAt ? new Date(a.accessTokenExpiresAt) : null,
+    refreshTokenExpiresAt: a.refreshTokenExpiresAt ? new Date(a.refreshTokenExpiresAt) : null,
+    scope: a.scope,
+    createdAt: new Date(a.createdAt),
+    updatedAt: new Date(a.updatedAt),
+  };
+}
+
+function serialiseDate(d: unknown): string | null {
+  if (!d) return null;
+  if (d instanceof Date) return d.toISOString();
+  if (typeof d === 'string') return d;
+  return null;
+}

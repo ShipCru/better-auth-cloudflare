@@ -1,0 +1,31 @@
+name = "better-auth-cloudflare-hono-do"
+main = "src/index.ts"
+compatibility_date = "2026-05-18"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+# UserDurableObject — one per principal. Owns BA user + account models.
+[[durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+# IdentityDurableObject — one per sha256(email). Global uniqueness.
+[[durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+# Sessions + verification + rate limits live in KV (BA secondaryStorage).
+[[kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+# Optional: Analytics Engine for testing/debugging telemetry
+[[analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"

@@ -8,3 +8,21 @@ bun.lock
 *.log
 .pnpm-store
 test-results/
+
+# Editor
+.idea/
+.vscode/
+
+# Local dev worktrees (per-user, never committed)
+.claude/worktrees/
+.claude/
+
+# TypeScript incremental build cache
+**/tsconfig.tsbuildinfo
+
+# Next.js / OpenNext build output
+.next/
+.open-next/
+
+# Wrangler local state
+.wrangler/

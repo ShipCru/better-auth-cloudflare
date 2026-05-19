@@ -11,6 +11,23 @@ type Variables = { auth: ReturnType<typeof createAuth> };
 
 const app = new Hono<{ Bindings: CloudflareBindings; Variables: Variables }>();
 
+// Note on compression: Cloudflare's edge automatically compresses responses
+// based on the client's Accept-Encoding header (brotli > gzip). We do NOT
+// run server-side compression here — Hono's compress() would compress
+// unconditionally and break clients that don't advertise Accept-Encoding.
+
+// Cache headers per route family. Cloudflare honors these at the edge.
+//   /api/auth/*  → no-store (auth state must never be cached)
+//   /admin/*     → private, max-age=10 (~aligns with the recovery sync window)
+app.use("/api/auth/*", async (c, next) => {
+    await next();
+    c.res.headers.set("Cache-Control", "private, no-store, max-age=0");
+});
+app.use("/admin/*", async (c, next) => {
+    await next();
+    c.res.headers.set("Cache-Control", "private, max-age=10");
+});
+
 app.use(
     "/api/auth/**",
     cors({

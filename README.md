@@ -64,8 +64,8 @@ Demo implementations are available in the [`examples/`](./examples/) directory f
 - [x] **KV-backed sessions** — BA secondaryStorage pattern, unchanged from upstream.
 - [ ] Cloudflare Email
 - [ ] Cloudflare Images
-- [ ] **KV read-cache layer for IdentityDO** — globally-cached email→principalId lookups (eliminates cross-region signin RPC). DO stays as the write oracle.
-- [ ] **Replace IdentityDO with D1 UNIQUE index** — current per-email-hash DO eats ~1-4s cold-start on every new signup. A D1 table with `UNIQUE (email_hash)` gives identical uniqueness guarantees with ~30-80ms cold reads and ~5ms warm. Make IdentityDO opt-in for users who prefer the no-DB-on-hot-path purity.
+- [ ] **KV write-through cache in front of IdentityDO** _(next variant in bench picker — `kv-cache`)_ — adapter writes `kv.put('identity:'+emailHash, {principalId, version})` in the same `waitUntil` as every IdentityDO commit/disable. Sign-in's `email→principal_id` lookup reads KV first (5-30ms globally) and falls back to IdentityDO on miss. **Freshness model:** IdentityDO stays the consistency floor for the `reserve()` uniqueness check; writes are write-through with monotonic `version` so the rare KV propagation race is detectable. **Expected:** signin email lookup 600-700ms → 20-50ms. Doesn't help signup (which goes to DO regardless), but signup is the rare op for our workload.
+- [ ] **Replace IdentityDO with D1 UNIQUE index** _(next variant in bench picker — `d1-unique`)_ — current per-email-hash DO eats ~1.2-4s cold-start on every new signup (validated in `/bench cold-burst-signup`: 2240-2735 ms across 4 fresh signups, ~zero colo amortization). A D1 table with `UNIQUE (email_hash)` gives identical uniqueness guarantees with ~30-80ms reads. **Expected:** signup p50 ~3.5s → ~1.0-1.5s. Pairs naturally with the KV cache above (D1 is consistency floor, KV is hot read cache). Make IdentityDO opt-in for users who prefer the no-DB-on-hot-path purity.
 - [ ] **D1 Sessions API for read replicas** — wire `db.withSession()` to use D1's global read replicas, so sign-in / `findUserByEmail` lookups served from the user's nearest replica (~30-80ms) instead of the single primary region (100-300ms cross-region). Writes still go to the primary; eventual consistency is bounded and survivable for auth metadata.
 - [ ] **Multi-region D1 deployments** — operate one D1 _primary_ per macro-region (NA / EU / APAC), each holding its own residency-isolated principals. Routing layer (a Workers-level matcher) picks the right D1 based on `cf.continent` and the principal's home region. Strict residency without giving up the ability to read locally.
 - [ ] **Multi-database routing for residency** — pluggable per-region database bindings (EU / US / APAC), so EU auth data stays in EU D1 (or Postgres via Hyperdrive). Hard-stop residency boundary.
@@ -76,6 +76,14 @@ Demo implementations are available in the [`examples/`](./examples/) directory f
 **Performance / observability:**
 
 > **Workload assumption.** Optimise for the typical pattern: a user signs up _once_, then returns days/weeks later — possibly from a different region. That puts **sign-in, `get-session`, and session-validation reads** on the hot path, not signup. Signup latency matters but a 1-3s signup is acceptable when sign-in and reads are sub-100ms globally. The roadmap below is ordered for that profile.
+>
+> **Bench-validated baseline** (measured in `examples/opennextjs-do/bench`, SJC colo, against the deployed Worker as of PR #5):
+>
+> - `warm-burst-signin` × 8 → 662-748 ms (p50 668, p95 721). Steady-state is dominated by scrypt CPU + 1 warm DO RPC.
+> - `cold-burst-signup` × 4 → 2240-2735 ms (p50 2251, p95 2618). DO instances do **not** meaningfully warm up across fresh cold starts in the same colo.
+> - `anon-burst` × 5 → 1267-2253 ms. Anon signin has no IdentityDO involvement so it's mostly UserDO cold-start cost.
+>
+> The two highest-ROI next changes (per the bench): **KV cache in front of IdentityDO** (sign-in hot path) and **D1 UNIQUE replacement for IdentityDO** (signup tail). Both are scaffolded as variants in the bench picker.
 
 - [x] **Structured per-method timing** _(ShipCru fork)_ — every DO RPC and adapter method emits `{op, durationMs, status}` via `timed(logger, op, fn)`. Visible in `wrangler tail --format=json` and Cloudflare Workers Logs.
 - [x] **Per-request log middleware** _(ShipCru fork)_ — one info line per Hono request with `{requestId, op, durationMs, status, colo, country}`. Indexable for p50/p95/p99 dashboards.

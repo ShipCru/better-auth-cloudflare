@@ -1,9 +1,26 @@
 import type { IncomingRequestCfProperties } from "@cloudflare/workers-types";
 import { betterAuth } from "better-auth";
-import { withCloudflare, d1AuthDataStore } from "better-auth-cloudflare";
+import { withCloudflare, d1AuthDataStore, createIdentityIndexCache } from "better-auth-cloudflare";
 import { anonymous } from "better-auth/plugins";
 import type { CloudflareBindings } from "../env";
 import * as fastHash from "./fast-hash";
+import * as pbkdf2Hash from "./pbkdf2-hash";
+
+/**
+ * Pick a password hash strategy based on env vars. Precedence:
+ *   USE_PBKDF2=1    → Web Crypto PBKDF2 (600k iters SHA-256)
+ *   USE_FAST_HASH=1 → scrypt(N=4096) via @noble/hashes
+ *   (default)       → BA's built-in scrypt(N=16384)
+ *
+ * The chosen hash format is encoded in each stored hash's prefix so
+ * verify() picks the right algorithm. A user created under one preset
+ * can only sign in under that preset (no cross-format verify shim).
+ */
+function pickPasswordConfig(env?: { USE_PBKDF2?: string; USE_FAST_HASH?: string }) {
+    if (env?.USE_PBKDF2 === "1") return { hash: pbkdf2Hash.hash, verify: pbkdf2Hash.verify };
+    if (env?.USE_FAST_HASH === "1") return { hash: fastHash.hash, verify: fastHash.verify };
+    return undefined;
+}
 
 /**
  * Single auth factory wired to the Durable Object adapter.
@@ -39,6 +56,15 @@ function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, 
                       // Use restorePrincipal() to replay a
                       // principal back into a DO that lost storage.
                       authDataStore: env.AUTH_DB ? d1AuthDataStore(env.AUTH_DB) : undefined,
+                      // Opt-in identity index cache. USE_KV_CACHE=1 puts a
+                      // KV layer (with optional D1 second tier via AUTH_DB)
+                      // in front of IdentityDO for email→principal_id
+                      // lookups. Writes through on commit/disable. See
+                      // src/adapters/identity-cache.ts in the lib.
+                      identityIndexCache:
+                          env.USE_KV_CACHE === "1" && env.KV
+                              ? createIdentityIndexCache({ kv: env.KV, d1: env.AUTH_DB })
+                              : undefined,
                       // Opt-in to the "emailHash is the primary lookup"
                       // architecture. When USE_THICK_IDENTITY=1 the adapter
                       // mirrors principal+account data into IdentityDO's
@@ -63,12 +89,10 @@ function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, 
                         `(in production, email this to the user)`
                     );
                 },
-                // Opt-in faster password hash preset. USE_FAST_HASH=1 swaps
-                // BA's default scrypt(N=16384, r=16) for scrypt(N=4096, r=8)
-                // — drops ~150-250ms of CPU per hash. See ./fast-hash.ts.
-                // Users created under the fast preset can ONLY sign in
-                // under the fast preset (verify checks the hash prefix).
-                password: env?.USE_FAST_HASH === "1" ? { hash: fastHash.hash, verify: fastHash.verify } : undefined,
+                // Password hash strategy selected via env var. See
+                // pickPasswordConfig above for the precedence rules
+                // (PBKDF2 > fast-scrypt > BA default).
+                password: pickPasswordConfig(env),
             },
             // Social providers. Wired conditionally — only enabled if env
             // credentials are present. Set GOOGLE_CLIENT_ID and

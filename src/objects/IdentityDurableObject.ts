@@ -26,7 +26,11 @@ CREATE TABLE IF NOT EXISTS identity (
   reservation_id          TEXT,
   reservation_expires_at  TEXT,
   committed_at            TEXT,
-  disabled_at             TEXT
+  disabled_at             TEXT,
+  -- Monotonic version bumped on every commit/disable. Allows downstream
+  -- caches (KV, D1 identity_index) to detect stale reads by comparing
+  -- their stored version against the DO's current version.
+  version                 INTEGER NOT NULL DEFAULT 0
 );
 
 -- Thick mode cache. Populated only when the adapter is configured with
@@ -53,7 +57,7 @@ export type ReserveResult =
     | { ok: false; reason: "disabled" };
 
 export type CommitResult =
-    | { ok: true }
+    | { ok: true; version: number }
     | { ok: false; reason: "no_reservation" | "reservation_expired" | "reservation_mismatch" };
 
 export interface IdentityDurableObjectEnv {
@@ -132,6 +136,7 @@ export class IdentityDurableObject<
             if (row.reservation_expires_at && new Date(row.reservation_expires_at).getTime() < Date.now()) {
                 return { ok: false, reason: "reservation_expired" } as CommitResult;
             }
+            const newVersion = (row.version ?? 0) + 1;
             runSql(
                 sql,
                 `UPDATE identity
@@ -139,13 +144,15 @@ export class IdentityDurableObject<
              principal_id = ?,
              committed_at = ?,
              reservation_id = NULL,
-             reservation_expires_at = NULL
+             reservation_expires_at = NULL,
+             version = ?
        WHERE email_hash = ?`,
                 principalId,
                 new Date().toISOString(),
+                newVersion,
                 emailHash
             );
-            return { ok: true } as CommitResult;
+            return { ok: true, version: newVersion } as CommitResult;
         });
     }
 
@@ -162,7 +169,7 @@ export class IdentityDurableObject<
         });
     }
 
-    async lookup(emailHash: string): Promise<{ principalId: string } | null> {
+    async lookup(emailHash: string): Promise<{ principalId: string; version: number } | null> {
         return timed(this.log, "lookup", async () => {
             const sql = this.ctx.storage.sql;
             const row = runSql(
@@ -171,21 +178,31 @@ export class IdentityDurableObject<
                 emailHash
             ).toArray()[0] as unknown as RawIdentity | undefined;
             if (!row || row.state !== "committed" || !row.principal_id) return null;
-            return { principalId: row.principal_id };
+            return { principalId: row.principal_id, version: row.version ?? 0 };
         });
     }
 
     async disable(emailHash: string): Promise<void> {
         return timed(this.log, "disable", async () => {
+            // Read current version so the bump is monotonic even if the row
+            // exists from a prior commit.
+            const existing = runSql(
+                this.ctx.storage.sql,
+                `SELECT version FROM identity WHERE email_hash = ?`,
+                emailHash
+            ).toArray()[0] as unknown as { version?: number } | undefined;
+            const newVersion = (existing?.version ?? 0) + 1;
             runSql(
                 this.ctx.storage.sql,
-                `INSERT INTO identity (email_hash, state, disabled_at)
-       VALUES (?, 'disabled', ?)
+                `INSERT INTO identity (email_hash, state, disabled_at, version)
+       VALUES (?, 'disabled', ?, ?)
        ON CONFLICT(email_hash) DO UPDATE
          SET state = 'disabled', disabled_at = excluded.disabled_at,
-             principal_id = NULL, reservation_id = NULL, reservation_expires_at = NULL`,
+             principal_id = NULL, reservation_id = NULL, reservation_expires_at = NULL,
+             version = excluded.version`,
                 emailHash,
-                new Date().toISOString()
+                new Date().toISOString(),
+                newVersion
             );
             // Invalidate thick cache for this identity if present.
             runSql(this.ctx.storage.sql, `DELETE FROM thick_cache WHERE email_hash = ?`, emailHash);
@@ -269,4 +286,5 @@ interface RawIdentity {
     reservation_expires_at: string | null;
     committed_at: string | null;
     disabled_at: string | null;
+    version: number;
 }

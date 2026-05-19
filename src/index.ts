@@ -15,6 +15,12 @@ export * from "./types";
 export * from "./r2";
 export { createDoAdapter, type Adapter, type DOAdapterConfig, type WhereClause } from "./adapters/do";
 export { d1AuthDataStore, AUTH_DATA_D1_SCHEMA, type AuthDataStore } from "./adapters/auth-data";
+export {
+    createIdentityIndexCache,
+    IDENTITY_INDEX_D1_SCHEMA,
+    type IdentityIndexCache,
+    type IdentityIndexEntry,
+} from "./adapters/identity-cache";
 export { restorePrincipal } from "./adapters/restore";
 export {
     UserDurableObject,

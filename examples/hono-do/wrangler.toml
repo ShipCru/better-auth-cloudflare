@@ -134,3 +134,80 @@ id = "YOUR_KV_NAMESPACE_ID"
 [[env.fast_hash.analytics_engine_datasets]]
 binding = "AUTH_ANALYTICS"
 dataset = "ba_cf_do_events"
+
+# Sibling deploy: native Web Crypto PBKDF2 (600k iters SHA-256) instead
+# of JS scrypt. Tests whether the Workers-native crypto path beats JS
+# at OWASP-recommended security level. See src/auth/pbkdf2-hash.ts.
+#
+#   wrangler deploy --env pbkdf2
+[env.pbkdf2]
+name = "better-auth-cloudflare-hono-do-pbkdf2"
+
+[env.pbkdf2.observability]
+enabled = true
+
+[env.pbkdf2.vars]
+USE_PBKDF2 = "1"
+
+[[env.pbkdf2.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.pbkdf2.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.pbkdf2.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.pbkdf2.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.pbkdf2.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+# Sibling deploy: KV cache (with optional D1 second tier) in front of
+# IdentityDO for email→principal_id lookups. Version-stamped for
+# freshness audit. See src/adapters/identity-cache.ts.
+#
+#   wrangler deploy --env kv_cache
+[env.kv_cache]
+name = "better-auth-cloudflare-hono-do-kv-cache"
+
+[env.kv_cache.observability]
+enabled = true
+
+[env.kv_cache.vars]
+USE_KV_CACHE = "1"
+
+[[env.kv_cache.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.kv_cache.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.kv_cache.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.kv_cache.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.kv_cache.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+# D1 second tier for the identity index. When bound, the cache writes
+# through to D1 too and reads fall to D1 on KV miss before going to
+# IdentityDO. Sessions API kicks in automatically for replica reads.
+# Apply IDENTITY_INDEX_D1_SCHEMA before first use.
+[[env.kv_cache.d1_databases]]
+binding = "AUTH_DB"
+database_name = "ba-cf-do-recovery"
+database_id = "00000000-0000-0000-0000-000000000000"

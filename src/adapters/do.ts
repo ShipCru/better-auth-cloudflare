@@ -2,6 +2,7 @@ import type { DurableObjectNamespace } from "@cloudflare/workers-types";
 import { createLogger, shortHash, timed, type Logger } from "../logging";
 import type { PrincipalRecord, AccountRecord } from "../objects/UserDurableObject";
 import type { AuthDataStore } from "./auth-data";
+import type { IdentityIndexCache } from "./identity-cache";
 
 /**
  * Better Auth adapter backed by per-principal Durable Objects.
@@ -71,6 +72,18 @@ export interface DOAdapterConfig {
      * write amplification may not be worth it.
      */
     thickIdentity?: boolean;
+    /**
+     * Optional identity index cache. When supplied, sign-in's
+     * `findOne(user, email, join.account)` consults the cache first
+     * (KV, then D1 if configured) for the email→principal_id mapping.
+     * Misses fall through to IdentityDO.lookup and the cache is
+     * back-filled. Hits avoid the IdentityDO RPC entirely (~5-30ms
+     * vs ~30-200ms warm). On commit/disable the cache is written
+     * through in the same handler.
+     *
+     * Build with `createIdentityIndexCache({ kv, d1?, log? })`.
+     */
+    identityIndexCache?: IdentityIndexCache;
 }
 
 export interface RegionContext {
@@ -337,6 +350,8 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                                         const accounts = JSON.parse(thick.accounts) as AccountRecord[];
                                         const baUser = mapPrincipalToBA(principal);
                                         (baUser as Record<string, unknown>).account = accounts.map(mapAccountToBA);
+                                        // Seed fresh-writes for BA's post-signin user refetch.
+                                        rememberFresh("user", thick.principalId, mapPrincipalToBA(principal));
                                         return baUser as never;
                                     }
                                     log.info("findOne.email.thick_miss", { principalId: thick.principalId });
@@ -349,11 +364,37 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                                     // @ts-expect-error
                                     const accounts = (await stub.listAccounts(p.id)) as AccountRecord[];
                                     (baUser as Record<string, unknown>).account = accounts.map(mapAccountToBA);
+                                    rememberFresh("user", thick.principalId, mapPrincipalToBA(p));
                                     return baUser as never;
                                 }
 
-                                // @ts-expect-error
-                                const lookup = (await idStub.lookup(emailHash)) as { principalId: string } | null;
+                                // KV-cache fast path: skip the IdentityDO RPC entirely
+                                // when we have a cached email→principal_id mapping. Falls
+                                // through to IdentityDO on miss and back-fills the cache.
+                                let principalIdFromCache: string | null = null;
+                                if (config.identityIndexCache) {
+                                    const hit = await config.identityIndexCache.get(emailHash);
+                                    if (hit) {
+                                        log.info("findOne.email.kv_hit", { version: hit.version });
+                                        principalIdFromCache = hit.principalId;
+                                    }
+                                }
+
+                                let lookup: { principalId: string; version: number } | null = null;
+                                if (principalIdFromCache) {
+                                    lookup = { principalId: principalIdFromCache, version: 0 };
+                                } else {
+                                    // @ts-expect-error
+                                    lookup = (await idStub.lookup(emailHash)) as {
+                                        principalId: string;
+                                        version: number;
+                                    } | null;
+                                    if (lookup && config.identityIndexCache) {
+                                        // Backfill cache for next reader. Non-blocking.
+                                        const entry = { principalId: lookup.principalId, version: lookup.version };
+                                        void config.identityIndexCache.upsert(emailHash, entry).catch(() => {});
+                                    }
+                                }
                                 if (!lookup) return null;
                                 const stub = userStub(lookup.principalId);
                                 // @ts-expect-error
@@ -363,6 +404,12 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                                 // @ts-expect-error
                                 const accounts = (await stub.listAccounts(p.id)) as AccountRecord[];
                                 (baUser as Record<string, unknown>).account = accounts.map(mapAccountToBA);
+                                // PERF: BA's sign-in flow calls findOne(user, id) after this
+                                // findOne(user, email) succeeds. Seed the fresh-writes cache so
+                                // that next call returns immediately without another DO RPC.
+                                // The stored value is the user *without* the joined account
+                                // (BA's signin refetch is just for the user shape).
+                                rememberFresh("user", lookup.principalId, mapPrincipalToBA(p));
                                 return baUser as never;
                             }
                             unsupported("findOne", model, "only `id` or `email` where-clauses supported");
@@ -504,6 +551,16 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                                 const idStub = identityStub(emailHash);
                                 // @ts-expect-error
                                 await idStub.disable(emailHash);
+                                // Invalidate the identity index cache too so a
+                                // recycled email_hash isn't served the old
+                                // principal_id from KV/D1.
+                                if (config.identityIndexCache) {
+                                    await config.identityIndexCache.invalidate(emailHash).catch(err =>
+                                        log.warn("identity-cache.invalidate failed", {
+                                            err: (err as Error)?.message,
+                                        })
+                                    );
+                                }
                                 log.info("identity disabled on user delete", { emailHash: await shortHash(emailHash) });
                             }
                             // @ts-expect-error
@@ -611,13 +668,20 @@ async function createUser(
         })) as PrincipalRecord;
         // @ts-expect-error
         const commit = (await idStub.commit(emailHash, reserveResult.reservationId, principalId)) as
-            | { ok: true }
+            | { ok: true; version: number }
             | { ok: false; reason: string };
         if (!commit.ok) {
             // @ts-expect-error
             await userStub.deletePrincipal();
             // fall through to throw below — no fallback write if commit failed
             throw new Error(`do-adapter: identity commit failed (${commit.reason})`);
+        }
+        // Write-through to KV (+ D1) cache so the first sign-in for this
+        // user finds the mapping immediately without an IdentityDO RPC.
+        if (config.identityIndexCache) {
+            await config.identityIndexCache
+                .upsert(emailHash, { principalId, version: commit.version })
+                .catch(err => log.warn("identity-cache.upsert failed", { err: (err as Error)?.message }));
         }
         return mapPrincipalToBA(p);
     } catch (err) {

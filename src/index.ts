@@ -32,6 +32,13 @@ export { createLogger, sha256Hex, shortHash, type Logger, type LogLevel } from "
 export { recordAdapterEvent, type AnalyticsRecorder } from "./telemetry/analytics";
 export { createOutboxFlush, type OutboxFlush, type OutboxEvent, type OutboxFlushConfig } from "./outbox";
 export { optionalBinding, requireBinding, resetOptionalBindingWarnings } from "./bindings";
+export {
+    getRequestId,
+    shortPrincipalHash,
+    logRequest,
+    withRequestLog,
+    type RequestLogFields,
+} from "./telemetry/request-log";
 
 /**
  * Cloudflare integration for Better Auth

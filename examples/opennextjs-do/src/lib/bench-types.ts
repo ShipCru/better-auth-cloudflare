@@ -39,10 +39,10 @@ export const BACKEND_VARIANTS = [
     },
     {
         id: "kv-cache",
-        binding: "AUTH_BACKEND_KV",
-        label: "KV write-through cache (not yet deployed)",
+        binding: "AUTH_BACKEND_KV_CACHE",
+        label: "KV cache for email→principal_id (with D1 second tier) — live",
         description:
-            "Current architecture + KV cache for email→principal_id. Expected: signin reads drop to ~5-30ms globally for cached entries.",
+            "Sibling deploy that puts KV (global ~5-30ms reads) and D1 (regional ~30-80ms via Sessions API) in front of IdentityDO for sign-in lookups. Version-stamped for freshness; write-through on commit/disable; falls through to IdentityDO on miss.",
     },
     {
         id: "fast-hash",
@@ -50,6 +50,13 @@ export const BACKEND_VARIANTS = [
         label: "Faster password hash preset (scrypt N=4096) — live",
         description:
             "Sibling deploy with scrypt(N=4096, r=8) instead of BA's default (N=16384, r=16). Targets the ~150-250ms scrypt slice of warm signin/signup. Hash format is incompatible with the default — users created here can only sign in here.",
+    },
+    {
+        id: "pbkdf2-fast",
+        binding: "AUTH_BACKEND_PBKDF2",
+        label: "Native Web Crypto PBKDF2 (100k iters — CF cap) — live",
+        description:
+            "Sibling deploy using crypto.subtle.deriveBits. Cloudflare Workers caps PBKDF2 at 100k iters (below OWASP 2023's 600k), so this is the fastest end of the perf spectrum at reduced cryptographic strength. Tests whether native crypto beats the JS scrypt variants.",
     },
 ] as const;
 

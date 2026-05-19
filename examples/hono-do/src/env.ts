@@ -17,4 +17,8 @@ export interface CloudflareBindings {
     USE_THICK_IDENTITY?: string;
     /** "1" swaps BA's scrypt default for the faster preset. See auth/fast-hash.ts. */
     USE_FAST_HASH?: string;
+    /** "1" swaps BA's scrypt default for native Web Crypto PBKDF2. See auth/pbkdf2-hash.ts. */
+    USE_PBKDF2?: string;
+    /** "1" enables KV cache for email→principal_id lookups. See auth/identity-cache.ts. */
+    USE_KV_CACHE?: string;
 }

@@ -37,3 +37,15 @@ service = "better-auth-cloudflare-hono-do-thick"
 [[services]]
 binding = "AUTH_BACKEND_FAST_HASH"
 service = "better-auth-cloudflare-hono-do-fast-hash"
+
+# Sibling auth Worker using native Web Crypto PBKDF2 (600k iters SHA-256).
+# `wrangler deploy --env pbkdf2`. A/B test of native crypto vs JS scrypt.
+[[services]]
+binding = "AUTH_BACKEND_PBKDF2"
+service = "better-auth-cloudflare-hono-do-pbkdf2"
+
+# Sibling auth Worker with KV (+ D1) cache in front of IdentityDO for
+# email→principal_id sign-in lookups. `wrangler deploy --env kv_cache`.
+[[services]]
+binding = "AUTH_BACKEND_KV_CACHE"
+service = "better-auth-cloudflare-hono-do-kv-cache"

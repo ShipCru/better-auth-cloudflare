@@ -407,11 +407,26 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                                                 principalIdShort: await shortHash(hit.principalId),
                                                 version: hit.version,
                                             });
-                                            // Stub return — BA only needs to see that the
-                                            // email is taken. id + email is enough for BA
-                                            // to surface EMAIL_ALREADY_EXISTS without
-                                            // hashing or reading the account record.
-                                            return { id: hit.principalId, email } as never;
+                                            // Enriched stub return — BA's existence check
+                                            // only needs truthiness, but the value also
+                                            // flows into `onExistingUserSignUp({ user })`
+                                            // if the app has that callback configured. We
+                                            // populate the standard user fields with safe
+                                            // defaults (null / false / epoch dates) so any
+                                            // such callback doesn't NPE reading them. The
+                                            // full record (with real name/image/etc.) is
+                                            // available from UserDO if a caller needs it —
+                                            // they should signin to get it.
+                                            const stub: Record<string, unknown> = {
+                                                id: hit.principalId,
+                                                email,
+                                                name: null,
+                                                emailVerified: false,
+                                                image: null,
+                                                createdAt: new Date(0),
+                                                updatedAt: new Date(0),
+                                            };
+                                            return stub as never;
                                         }
                                     }
                                     log.info("findOne.email.skipped_idDO", {});

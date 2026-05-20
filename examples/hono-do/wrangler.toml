@@ -429,3 +429,49 @@ dataset = "ba_cf_do_events"
 binding = "AUTH_DB"
 database_name = "ba-cf-do-recovery"
 database_id = "00000000-0000-0000-0000-000000000000"
+
+# Same as d1_unique_stateless but with the D1 primary in APAC instead
+# of ENAM. Used purely to bench "what if the user is on the opposite
+# side of the world from the D1 primary?" — proves D1 read replicas +
+# Sessions API can cover global signin reads even with a far primary,
+# and quantifies the cross-region INSERT tax that signups pay.
+#
+#   wrangler secret put BETTER_AUTH_SECRET --env d1_unique_stateless_apac
+#   wrangler secret put BETTER_AUTH_PEPPER --env d1_unique_stateless_apac
+#   wrangler deploy --env d1_unique_stateless_apac
+[env.d1_unique_stateless_apac]
+name = "ba-cf-do-d1u-stateless-apac"
+
+[env.d1_unique_stateless_apac.observability]
+enabled = true
+
+[env.d1_unique_stateless_apac.vars]
+USE_PBKDF2 = "1"
+USE_D1_IDENTITY = "1"
+USE_BUNDLE_RPC = "1"
+USE_STATELESS_SESSION = "1"
+
+[[env.d1_unique_stateless_apac.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.d1_unique_stateless_apac.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.d1_unique_stateless_apac.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.d1_unique_stateless_apac.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.d1_unique_stateless_apac.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+[[env.d1_unique_stateless_apac.d1_databases]]
+binding = "AUTH_DB"
+database_name = "ba-cf-do-recovery-apac"
+database_id = "00000000-0000-0000-0000-000000000000"

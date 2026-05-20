@@ -269,6 +269,86 @@ Stateful variants spend 60-440 ms on signout despite KV DELETE being deferred vi
 
 The bimodal IdentityDO numbers (cheap in enam/eeur/apac/me, expensive in wnam/sam/oc/afr) come from BA's early `findOne(user, email, join.account=true)` hitting the warm IdentityDO and short-circuiting — except in regions where the bench-run's prepareUser created the IdentityDO in a different colo from where the dup-signups land. D1-unique stays consistent (~600-1000 ms) because its `findOne` skip-path doesn't catch dup-email; the recommended `Promise.race` against the KV `identity_index` pre-check in the roadmap below would flatten this.
 
+### Top 3 implementations — side-by-side across every op
+
+Picking the three production-viable picks and showing every op's p50 (ms, n=30) head-to-head. Lower is better.
+
+#### 1. `d1-unique-stateless` — best overall, recommended default
+
+Sub-1 s signup globally, sub-100 ms signin globally, instant signout. Stateless cookie (no remote revocation), slow dup-email path. Best for high-volume apps where you'd rather rotate the signing secret than revoke individual sessions.
+
+| op                   | wnam | enam | sam | weur | eeur | apac |   oc |  me | afr |
+| -------------------- | ---: | ---: | --: | ---: | ---: | ---: | ---: | --: | --: |
+| signup               |  438 |  657 | 689 |  430 |  793 |  916 |  788 | 666 | 501 |
+| signin (warm)        |   22 |   62 |  24 |   25 |   46 |   40 |   85 |  29 |  43 |
+| signout              |    0 |    0 |  17 |    0 |    0 |    0 |    0 |   0 |   0 |
+| dup-signup           |  758 |  684 | 691 |  587 |  747 |  996 |  944 | 728 | 677 |
+| lifecycle (su+so+si) |  701 |  717 | 631 |  606 |  765 | 1010 | 1004 | 686 | 624 |
+
+#### 2. `recommended` — best stateful (revocable, full security stack)
+
+PBKDF2 + HMAC pepper + KV identity cache + bundle RPC + KV-backed sessions, with `waitUntil`-deferred KV writes. Sub-30 ms warm signin, revocable sessions (sign-out invalidates server-side), defense against offline DB-leak attacks via the server-side pepper. Slow signup. Best for enterprise apps with security/revocation requirements.
+
+| op                   | wnam | enam |  sam | weur | eeur | apac |   oc |   me |  afr |
+| -------------------- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| signup               | 1721 | 1526 | 1759 | 1200 | 1687 | 2268 | 2388 | 1413 | 1446 |
+| signin (warm)        |   27 |   14 |   32 |   29 |   26 |   32 |   60 |   31 |   33 |
+| signout              |  167 |   72 |  240 |  112 |  111 |  226 |  376 |  100 |  222 |
+| dup-signup           |  936 |   68 |  793 |  456 |   74 |   79 | 1201 |   64 |  697 |
+| lifecycle (su+so+si) | 2273 | 2226 | 2017 | 1212 | 1983 | 4409 | 4792 | 1573 | 1257 |
+
+#### 3. `stateless` — fastest signin, simplest model
+
+Same DO architecture as `recommended` but drops BA's KV `secondaryStorage` entirely — the signed cookie _is_ the session. Sub-40 ms signin global, instant signout, but no remote revocation and moderate signup cost. Best for read-heavy apps where signin is the only hot op and rotation > revocation.
+
+| op                   | wnam | enam |  sam | weur | eeur | apac |   oc |   me |  afr |
+| -------------------- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| signup               | 1469 | 1358 | 1593 | 1215 | 1537 | 1861 | 1986 | 1367 | 1440 |
+| signin (warm)        |   15 |   32 |   19 |   14 |   66 |   13 |   39 |   25 |   17 |
+| signout              |    0 |    0 |    5 |    0 |    0 |    0 |    0 |    0 |    0 |
+| dup-signup           |  936 |   68 |  793 |  534 |  103 |   77 |  963 |   61 | 1127 |
+| lifecycle (su+so+si) | 1400 | 1374 | 1250 | 1062 | 1432 | 2047 | 2113 | 1294 | 1116 |
+
+**My pick:** `d1-unique-stateless` for the default; fall back to `recommended` if you need server-side session revocation. `stateless` is a niche choice (you only care about signin and accept signup at the recommended floor).
+
+### D1 primary location — what if the database is far from the user?
+
+The default `d1-unique` family points at `ba-cf-do-recovery-enam` (primary in `enam`, read replicas auto). To answer "what if the database is on the other side of the planet," there's now a sibling deploy `d1-unique-stateless-apac` backed by `ba-cf-do-recovery-apac` (primary in `apac`, replicas auto). Same code, only the primary changes.
+
+Head-to-head p50 (ms, n=30), `d1-unique-stateless`:
+
+**Signup** (one D1 INSERT to primary per request):
+
+| region | D1 primary in enam (default) | D1 primary in apac (far away) | delta |
+| ------ | ---------------------------: | ----------------------------: | ----: |
+| wnam   |                          662 |                           655 |    −7 |
+| enam   |                          603 |                           595 |    −8 |
+| weur   |                          529 |                           539 |   +10 |
+| eeur   |                          682 |                           700 |   +18 |
+| apac   |                          875 |                           908 |   +33 |
+| oc     |                          889 |                           905 |   +16 |
+| me     |                          621 |                           621 |     0 |
+| afr    |                          574 |                           561 |   −13 |
+
+Signup latency moves by ≤33 ms regardless of where the D1 primary sits. The PBKDF2 hash + UserDO RPC dominate; the cross-region INSERT is a small slice of the total because CF's internal network is fast.
+
+**Signin** (one D1 SELECT via Sessions API → reads from nearest replica):
+
+| region   | D1 primary in enam (default) | D1 primary in apac (far away) |    delta |
+| -------- | ---------------------------: | ----------------------------: | -------: |
+| wnam     |                           30 |                            72 |      +42 |
+| enam     |                           54 |                            72 |      +18 |
+| weur     |                           29 |                            42 |      +13 |
+| eeur     |                           64 |                            52 |      −12 |
+| **apac** |                      **134** |                        **21** | **−113** |
+| **oc**   |                       **85** |                        **44** |  **−41** |
+| me       |                           31 |                            52 |      +21 |
+| afr      |                           36 |                            39 |       +3 |
+
+**Headline finding:** with read replication enabled, the primary's physical location barely matters for signin reads — D1 serves them from the nearest replica. Moving the primary to APAC makes APAC signin **−84% faster** (replica AND primary are local now), penalising NA users by only +18–42 ms (their reads come from an NA replica that fetches + caches from the APAC primary on first miss; warm reads are fast).
+
+**Practical conclusion:** put the D1 primary wherever your _writes_ (signups) come from most, then let Sessions API + replicas handle reads everywhere. For a mostly-NA user base, `enam` is right. For an APAC-first product, `apac` is right. For a balanced global product, either works within ~50 ms of the other and the delta is dominated by which region you optimize signin latency for.
+
 ### Get-session p50 (ms, n=30)
 
 The probe-worker calls `GET /api/auth/get-session` with **no cookie** — all variants return `{session:null,user:null}` in ≤30 ms p95 globally (often ≤1 ms). For warm authenticated `get-session`, see the lifecycle bench above where the second-iteration signin within the same probe DO benefits from cookieCache (sub-100 ms p50 stateless / d1-unique-stateless).

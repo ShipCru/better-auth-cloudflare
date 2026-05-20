@@ -39,6 +39,7 @@ const VARIANT_TO_BINDING: Record<string, string> = {
     stateless: "AUTH_BACKEND_STATELESS",
     "d1-unique": "AUTH_BACKEND_D1_UNIQUE",
     "d1-unique-stateless": "AUTH_BACKEND_D1_UNIQUE_STATELESS",
+    "d1-unique-stateless-apac": "AUTH_BACKEND_D1_UNIQUE_STATELESS_APAC",
 };
 
 const app = new Hono<{ Bindings: Env }>();

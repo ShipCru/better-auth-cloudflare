@@ -1,32 +1,31 @@
 /**
- * Better Auth adapter backed by CockroachDB via Hyperdrive.
+ * Better Auth adapter backed by CockroachDB via Cloudflare Hyperdrive.
+ * Single multi-region cluster (REGIONAL BY ROW) — same pattern glass
+ * uses in production.
  *
- * Routing: 3 Hyperdrive bindings (one per region — us-east-2,
- * eu-central-1, ap-southeast-1) plus 3 separate CRDB clusters (one
- * per region). At request time, the adapter picks the binding that
- * matches `cf.continent`:
+ * One Hyperdrive binding talks to the cluster. CRDB itself handles
+ * region routing: each row's `crdb_region` column determines which
+ * region's nodes physically hold it. Same-region queries are local
+ * Postgres latency; cross-region queries transparently fetch from the
+ * home region.
  *
- *   NA  → HYPERDRIVE_NA (us-east-2)
- *   EU  → HYPERDRIVE_EU (eu-central-1)
- *   AS/OC → HYPERDRIVE_APAC (ap-southeast-1)
- *   else → HYPERDRIVE_NA (default)
+ * Region selection on signup:
+ *   - The `users.crdb_region` column defaults to
+ *     `default_to_database_primary_region(gateway_region())` at INSERT,
+ *     i.e., wherever the SQL gateway lives. With Hyperdrive picking the
+ *     nearest gateway to the worker, the user's row lands near them.
+ *   - The `accounts.crdb_region` column is set explicitly to match the
+ *     parent user's region (sent by the adapter on the second INSERT).
  *
- * Same-region writes are local-Postgres-fast (~5–20 ms). Hyperdrive
- * pools connections at the edge so cold-start TLS handshake is amortised.
- *
- * Perf patterns ported from the D1/DO adapters in this PR:
+ * Perf patterns ported from the D1/DO adapters in earlier PRs:
  *
  *   - KV identity_index pre-check on the dup-email signup path
- *     (`Promise.race` against a 50 ms ceiling; cache hit → stub user
+ *     (Promise.race against a 50 ms ceiling; cache hit → stub user
  *     so BA short-circuits without hashing)
  *   - Write-through to KV identity_index on successful signup
- *   - `Promise.allSettled([INSERT user, INSERT account])` not yet —
- *     these are sequential here because the account row references
- *     user.id and we want the FK invariant honoured at the SQL layer.
- *     The user-insert is one round-trip; the account-insert is the
- *     second. Total signup: 2 cross-isolate Hyperdrive calls.
- *   - `waitUntil` for the KV write-through so it doesn't block the
- *     signup response.
+ *   - All region-aware reads include `WHERE crdb_region = $hint` so
+ *     CRDB can prune partitions and serve from the local replica.
+ *   - waitUntil for the KV write-through so it doesn't block signup.
  */
 import type { Hyperdrive } from "@cloudflare/workers-types";
 import { drizzle } from "drizzle-orm/cockroach";
@@ -36,23 +35,27 @@ import type { IdentityIndexCache } from "better-auth-cloudflare";
 import { users, accounts } from "./schema";
 
 /**
- * Cloudflare region codes — matched against `cf.continent` to pick
- * the right Hyperdrive. Aligns with the lib's `examples/probe-worker`
- * region scheme.
- *
- *   enam  → AWS us-east-2 (cf.continent === "NA", "SA", "OC", default)
- *   weur  → AWS eu-central-1 (cf.continent === "EU", "AF")
- *
- * APAC traffic falls through to `enam` for now. Adding a third region
- * (e.g., AWS ap-southeast-1) is a config-only change: extend `hyperdrives`,
- * add another `if` in `pickRegion()`, and provision the cluster + Hyperdrive.
+ * Cluster region codes — matched against `cf.continent` to pick the
+ * `crdb_region` hint we pass on inserts. Add a new region here AND on
+ * the CRDB cluster (`ALTER DATABASE ... ADD REGION ...`) to extend.
  */
-export type CrdbRegion = "enam" | "weur";
+/**
+ * Cluster region codes — match CRDB Cloud's region naming, used both
+ * to pick the Hyperdrive AND as the `crdb_region` column value.
+ */
+export type CrdbRegion = "us-east-2" | "eu-central-1";
 
 export interface CrdbAdapterConfig {
-    /** One Hyperdrive binding per region. Region keys match CF region codes. */
-    hyperdrives: { enam: Hyperdrive; weur: Hyperdrive };
-    /** Cloudflare `cf` block from the request — used to pick the region. */
+    /**
+     * One Hyperdrive per region's SQL gateway. All Hyperdrives point at
+     * the SAME multi-region CRDB cluster — they differ only in which
+     * SQL gateway hostname they connect to. Picking the nearest gateway
+     * means the SQL session lands in that region, the row's
+     * `gateway_region()` default places it locally, and reads/writes
+     * stay in-region.
+     */
+    hyperdrives: { "us-east-2": Hyperdrive; "eu-central-1": Hyperdrive };
+    /** Cloudflare `cf` block — used to pick the Hyperdrive. */
     cf?: { continent?: string | null };
     /** Optional KV identity_index for the dup-email pre-check. */
     identityIndexCache?: IdentityIndexCache;
@@ -86,15 +89,17 @@ export interface Adapter {
     count(args: { model: string; where?: WhereClause[] }): Promise<number>;
 }
 
+/**
+ * Map `cf.continent` → CRDB region name. The names match what was passed
+ * to `ALTER DATABASE ... ADD REGION` on the cluster.
+ *
+ * EU + AF go to eu-central-1 (data-residency boundary + AF colos closer
+ * to EU than US). Everything else (NA, SA, AS, OC, AN, unknown) goes to
+ * us-east-2 — the primary region.
+ */
 function pickRegion(continent: string | null | undefined): CrdbRegion {
-    // EU + AF route to the eu-central-1 cluster (data-residency boundary).
-    // Everything else — NA, SA, AS, OC, AN, unknown — goes to us-east-2.
-    // AS/OC fallback exists because a Singapore CRDB cluster is queued as
-    // the next region but not provisioned yet; routing them through enam
-    // is one trans-Pacific hop, ~150-250 ms vs the ~80 ms a local APAC
-    // cluster would give us.
-    if (continent === "EU" || continent === "AF") return "weur";
-    return "enam";
+    if (continent === "EU" || continent === "AF") return "eu-central-1";
+    return "us-east-2";
 }
 
 async function hashEmail(email: string): Promise<string> {
@@ -107,9 +112,9 @@ async function hashEmail(email: string): Promise<string> {
 
 /**
  * Pool factory. Hyperdrive presents a Postgres connection string via
- * `binding.connectionString`. We open a `pg.Pool` once per
- * (isolate, region) — `pg.Pool` keeps connections warm across requests
- * in the same isolate (CF Fluid Compute reuses isolates).
+ * `binding.connectionString`. We open a `pg.Pool` once per isolate —
+ * `pg.Pool` keeps connections warm across requests in the same isolate
+ * (CF Fluid Compute reuses isolates).
  *
  * Bounded to max=1 because Hyperdrive itself does the connection
  * pooling at the edge — local pool is just for the in-flight call.
@@ -131,9 +136,6 @@ function getPool(region: CrdbRegion, hyperdrive: Hyperdrive): Pool {
 export function createCrdbAdapter(config: CrdbAdapterConfig): Adapter {
     const region = pickRegion(config.cf?.continent);
     const hyperdrive = config.hyperdrives[region];
-    if (!hyperdrive) {
-        throw new Error(`crdb-adapter: no Hyperdrive binding for region "${region}"`);
-    }
     const db = drizzle({ client: getPool(region, hyperdrive) });
 
     function whereToObj(where: WhereClause[]): Record<string, unknown> {
@@ -152,6 +154,11 @@ export function createCrdbAdapter(config: CrdbAdapterConfig): Adapter {
                 const [row] = await db
                     .insert(users)
                     .values({
+                        // Don't set crdbRegion explicitly — let the SQL
+                        // default (default_to_database_primary_region(gateway_region()))
+                        // pick the SQL gateway's region. Hyperdrive routes
+                        // to the nearest gateway, so this is the right place
+                        // for the user's row.
                         name: (data.name as string) ?? "",
                         email,
                         emailVerified: (data.emailVerified as boolean) ?? false,
@@ -170,9 +177,16 @@ export function createCrdbAdapter(config: CrdbAdapterConfig): Adapter {
                 return row as never;
             }
             if (model === "account") {
+                // The account's region MUST match the parent user's region.
+                // We use the hint from cf.continent for new signups (the
+                // user was just inserted into the same region). For
+                // OAuth-account-add against an existing user, the caller
+                // should pass `data.crdbRegion` explicitly.
+                const accountRegion = typeof data.crdbRegion === "string" ? (data.crdbRegion as CrdbRegion) : region;
                 const [row] = await db
                     .insert(accounts)
                     .values({
+                        crdbRegion: accountRegion,
                         userId: data.userId as string,
                         providerId: data.providerId as string,
                         accountId: (data.accountId as string) ?? (data.userId as string),
@@ -191,12 +205,9 @@ export function createCrdbAdapter(config: CrdbAdapterConfig): Adapter {
         async findOne({ model, where, join }) {
             const w = whereToObj(where);
             if (model === "user") {
-                // KV pre-check on dup-email signup path (same pattern as
-                // do.ts findOne in the D1 adapter). When findOne is called
-                // with `email` and no `join`, BA is checking existence —
-                // a KV cache hit means the email is taken; return a stub
-                // user so BA short-circuits to EMAIL_ALREADY_EXISTS without
-                // ever hashing the password.
+                // KV pre-check on dup-email signup path. Cache hit means
+                // the email is taken; return a stub user so BA short-
+                // circuits to EMAIL_ALREADY_EXISTS without ever hashing.
                 if (typeof w.email === "string" && !join?.account && config.identityIndexCache) {
                     const emailHash = await hashEmail(w.email);
                     const ceiling = new Promise<null>(r => setTimeout(() => r(null), 50));
@@ -218,11 +229,20 @@ export function createCrdbAdapter(config: CrdbAdapterConfig): Adapter {
                 }
 
                 if (typeof w.email === "string") {
+                    // No `crdb_region` filter here — email is a globally-
+                    // unique secondary index, and we don't know the user's
+                    // home region without looking it up. UNIQUE is enforced
+                    // globally by CRDB's cross-partition check.
                     const rows = await db.select().from(users).where(eq(users.email, w.email)).limit(1);
                     if (rows.length === 0) return null;
                     const user = rows[0];
                     if (join?.account) {
-                        const accountRows = await db.select().from(accounts).where(eq(accounts.userId, user.id));
+                        // Region-aware join: the parent user's region tells
+                        // us where the account rows live, so we prune.
+                        const accountRows = await db
+                            .select()
+                            .from(accounts)
+                            .where(and(eq(accounts.userId, user.id), eq(accounts.crdbRegion, user.crdbRegion)));
                         return { ...user, account: accountRows } as never;
                     }
                     return user as never;

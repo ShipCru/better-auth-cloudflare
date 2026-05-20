@@ -9,17 +9,24 @@
  * No `verifications` (forget-password flow not in the bench scope yet).
  * No `sessions` (we run stateless — the signed cookie IS the session).
  *
- * Multi-region: the `crdb_region` column + `REGIONAL BY ROW` locality
- * is added by SQL migration *after* the table is created. Drizzle
- * doesn't model `LOCALITY` directly — that's a CRDB DDL extension
- * applied via raw SQL in `migrations/0001_regional_by_row.sql`.
+ * Single multi-region cluster: each table includes `crdb_region` and is
+ * set to `LOCALITY REGIONAL BY ROW` via the migration SQL. The default
+ * for `crdb_region` is `default_to_database_primary_region(gateway_region())`
+ * cast to `crdb_internal_region` — at insert time, the row lands in the
+ * region of the SQL gateway it hit, which (because Hyperdrive is also
+ * region-aware) matches the user's edge.
+ *
+ * REGIONAL BY ROW means same-region reads + writes are local Postgres
+ * latency (~5-20 ms). Cross-region reads transparently fetch from the
+ * row's home region (slower, ~80-200 ms).
  *
  * Drizzle 1.0.0-rc.3 cockroach-core preserved column names exactly as
- * in glass so a future migration from one to the other doesn't require
- * a rename pass.
+ * in glass so future migrations don't need a rename pass.
  */
+import { sql } from "drizzle-orm";
 import {
     cockroachTable,
+    cockroachEnum,
     varchar,
     text,
     boolean,
@@ -28,6 +35,30 @@ import {
     uniqueIndex,
     timestamp,
 } from "drizzle-orm/cockroach-core";
+
+/**
+ * `crdb_internal_region` is a system-managed enum — CRDB creates it
+ * automatically when you `ALTER DATABASE ... ADD REGION 'X'`. We
+ * declare it here only so Drizzle has a TS type for the column;
+ * drizzle-kit shouldn't generate a CREATE TYPE for it (the enum is
+ * owned by the database, not the application). Glass uses the same
+ * pattern in `packages/database/modules/drizzle/crdbRegion.ts`.
+ *
+ * Values must match the regions configured on the live cluster.
+ */
+export const crdbInternalRegion = cockroachEnum("crdb_internal_region", ["us-east-2", "eu-central-1"]);
+
+/**
+ * `default_to_database_primary_region(gateway_region())` — the
+ * CockroachDB-native expression that picks the SQL gateway's home
+ * region (or falls back to the database's primary region if the
+ * gateway region isn't a configured database region). Cast through
+ * the system-managed enum so Drizzle generates the right DDL.
+ *
+ * Glass uses the same expression in
+ * `packages/database/modules/drizzle/gatewayRegionHome.ts`.
+ */
+const closestCrdbRegionFromGatewaySql = sql`default_to_database_primary_region(gateway_region())::crdb_internal_region`;
 
 /**
  * Users table. The bench's signup writes here.
@@ -42,6 +73,11 @@ export const users = cockroachTable(
     "users",
     {
         id: uuid("id").primaryKey().defaultRandom(),
+
+        // REGIONAL BY ROW partition column. Default = SQL gateway's region.
+        // Each row physically lives in this region's nodes; cross-region
+        // reads are transparent but slower.
+        crdbRegion: crdbInternalRegion("crdb_region").notNull().default(closestCrdbRegionFromGatewaySql),
 
         // BA-required fields
         name: text("name").notNull(),
@@ -74,6 +110,12 @@ export const accounts = cockroachTable(
     "accounts",
     {
         id: uuid("id").primaryKey().defaultRandom(),
+
+        // Inherits from the parent user's region — set explicitly in
+        // the adapter at insert time, NOT defaulted from gateway_region
+        // (an account row must live in the same region as its parent
+        // user, even if the OAuth callback hits a different SQL gateway).
+        crdbRegion: crdbInternalRegion("crdb_region").notNull(),
 
         userId: uuid("user_id").notNull(),
 

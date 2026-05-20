@@ -16,15 +16,16 @@ export interface CloudflareBindings {
     GOOGLE_CLIENT_SECRET?: string;
     /**
      * "1" routes user + account writes through the crdb-multi-region
-     * adapter (one Hyperdrive per region). Requires HYPERDRIVE_ENAM
-     * and HYPERDRIVE_WEUR bindings + matching CRDB Cloud clusters in
-     * us-east-2 and eu-central-1. APAC traffic falls through to ENAM.
-     * Region names match the CF region codes used by the probe-worker.
+     * adapter. Backed by ONE multi-region CRDB Cloud cluster with
+     * REGIONAL BY ROW locality + TWO Hyperdrive bindings (one per
+     * region's SQL gateway). The adapter picks the binding nearest the
+     * user via `cf.continent`. Same cluster either way; the row lands
+     * in the region of the SQL gateway hit (CRDB `gateway_region()`).
      */
     USE_CRDB_MULTI?: string;
-    /** Hyperdrive binding for the ENAM (us-east-2) CRDB cluster. */
+    /** Hyperdrive → us-east-2 SQL gateway of the multi-region CRDB cluster. */
     HYPERDRIVE_ENAM?: Hyperdrive;
-    /** Hyperdrive binding for the WEUR (eu-central-1) CRDB cluster. */
+    /** Hyperdrive → eu-central-1 SQL gateway of the same multi-region CRDB cluster. */
     HYPERDRIVE_WEUR?: Hyperdrive;
     /** "1" enables the thick IdentityDO sign-in fast path. Set per wrangler env. */
     USE_THICK_IDENTITY?: string;

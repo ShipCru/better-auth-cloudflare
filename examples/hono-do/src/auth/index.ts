@@ -159,8 +159,8 @@ function createAuth(
         env?.USE_CRDB_MULTI === "1" && env.HYPERDRIVE_ENAM && env.HYPERDRIVE_WEUR
             ? createCrdbAdapter({
                   hyperdrives: {
-                      enam: env.HYPERDRIVE_ENAM,
-                      weur: env.HYPERDRIVE_WEUR,
+                      "us-east-2": env.HYPERDRIVE_ENAM,
+                      "eu-central-1": env.HYPERDRIVE_WEUR,
                   },
                   cf,
                   identityIndexCache:

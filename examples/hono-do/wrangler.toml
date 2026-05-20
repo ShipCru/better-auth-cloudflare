@@ -481,29 +481,28 @@ binding = "AUTH_DB"
 database_name = "ba-cf-do-recovery-apac"
 database_id = "00000000-0000-0000-0000-000000000000"
 
-# CockroachDB + Hyperdrive (3 regions). Same source code as the other
-# variants but the BA adapter is replaced with the crdb-multi-region
-# adapter, which picks one of two Hyperdrive bindings by cf.continent:
-#
-#   NA → HYPERDRIVE_ENAM      (us-east-2 CRDB Cloud cluster)
-#   EU → HYPERDRIVE_WEUR      (eu-central-1)
+# CockroachDB + Hyperdrive — single multi-region cluster (REGIONAL BY ROW).
+# Same pattern glass uses in production: one CRDB Cloud cluster with
+# both us-east-2 and eu-central-1 as configured regions. Each row's
+# `crdb_region` column places it on the right region's nodes. Hyperdrive
+# pools connections to the nearest SQL gateway.
 #
 # Setup checklist before deploying:
-#   1. CRDB Cloud: create two Serverless clusters in
-#      us-east-2 + eu-central-1. Single-region each.
-#      Note the connection strings.
-#   2. Apply schema: `psql "$URL" -f src/crdb/migrations/0000_init.sql`
-#      for each cluster.
-#   3. Cloudflare: `wrangler hyperdrive create ba-crdb-na
-#        --connection-string="postgresql://...us-east-2..."`
-#      (repeat for eu and apac).
-#   4. Paste the two Hyperdrive ids below.
+#   1. CRDB Cloud: create ONE multi-region Serverless cluster.
+#      Add us-east-2 (primary) and eu-central-1 as regions in the
+#      cluster's Settings → Regions panel.
+#      Note the connection string (one URL, the SQL gateway resolves
+#      to the nearest region automatically).
+#   2. Apply schema once:
+#        psql "$URL" -f src/crdb/migrations/0000_init.sql
+#   3. Cloudflare: wrangler hyperdrive create ba-crdb \
+#        --connection-string="$URL"
+#   4. Paste the Hyperdrive id below.
 #   5. wrangler secret put BETTER_AUTH_SECRET --env crdb_multi
 #   6. wrangler secret put BETTER_AUTH_PEPPER --env crdb_multi
 #   7. wrangler deploy --env crdb_multi
 #
-# Bench via the existing probe-worker once a service binding is added
-# (see examples/probe-worker/wrangler.toml).
+# Bench via the existing probe-worker (AUTH_BACKEND_CRDB_MULTI binding).
 [env.crdb_multi]
 name = "ba-cf-do-crdb-multi"
 
@@ -539,10 +538,13 @@ id = "YOUR_KV_NAMESPACE_ID"
 binding = "AUTH_ANALYTICS"
 dataset = "ba_cf_do_events"
 
-# Hyperdrive bindings — one per region. The CRDB Cloud cluster behind
-# each must live in the matching AWS region. Apply the schema before
-# the first deploy. Paste the real ids after `wrangler hyperdrive create`.
-# Two regions for now; APAC traffic falls through to the ENAM cluster.
+# Two Hyperdrives pointing at the SAME multi-region CRDB Cloud cluster
+# but at different regional SQL gateway hostnames. Hyperdrive is itself
+# regional (it caches connections at every CF edge), so using one
+# Hyperdrive per gateway lets each region's worker requests land on
+# the closest gateway. The row's `gateway_region()` default then
+# places it in that region (REGIONAL BY ROW). Both bindings → same
+# cluster, same data. Different ingress paths.
 [[env.crdb_multi.hyperdrive]]
 binding = "HYPERDRIVE_ENAM"
 id = "YOUR_HYPERDRIVE_ENAM_ID"

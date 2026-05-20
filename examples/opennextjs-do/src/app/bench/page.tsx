@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import {
     BACKEND_VARIANTS,
     SCENARIOS,
@@ -9,6 +9,20 @@ import {
     type ScenarioId,
     type VariantId,
 } from "@/lib/bench-types";
+
+interface MeGeo {
+    colo: string | null;
+    country: string | null;
+    continent: string | null;
+    region: string | null;
+    regionCode: string | null;
+    city: string | null;
+    timezone: string | null;
+    asn: number | null;
+    asOrganization: string | null;
+    latitude: string | null;
+    longitude: string | null;
+}
 
 interface RunRow extends BenchScenarioResult {
     transport: "binding" | "http";
@@ -52,6 +66,22 @@ export default function BenchPage() {
     const [regionalRows, setRegionalRows] = useState<RegionalRow[]>([]);
     const [runningRegional, setRunningRegional] = useState(false);
     const [regionalOp, setRegionalOp] = useState<"signin" | "signup" | "anon" | "get-session">("signin");
+    const [me, setMe] = useState<MeGeo | null>(null);
+
+    useEffect(() => {
+        let cancelled = false;
+        fetch("/api/bench/me", { cache: "no-store" })
+            .then(r => r.json())
+            .then((data: MeGeo) => {
+                if (!cancelled) setMe(data);
+            })
+            .catch(() => {
+                if (!cancelled) setMe(null);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, []);
 
     async function runRegional() {
         setRunningRegional(true);
@@ -125,6 +155,31 @@ export default function BenchPage() {
                     warmup behavior directly. Hit this page from different regions to capture geo latency in{" "}
                     <code>colo</code>/<code>country</code>.
                 </p>
+                {me && (
+                    <div className="mt-3 inline-flex flex-wrap items-center gap-2 rounded-md border border-blue-200 bg-blue-50 dark:border-blue-900 dark:bg-blue-950/40 px-3 py-2 text-xs">
+                        <span className="font-semibold text-blue-900 dark:text-blue-200">You are here:</span>
+                        {me.colo && <Pill>colo {me.colo}</Pill>}
+                        {me.city && me.country && (
+                            <Pill>
+                                {me.city}, {me.country}
+                                {me.continent ? ` (${me.continent})` : ""}
+                            </Pill>
+                        )}
+                        {!me.city && me.country && (
+                            <Pill>
+                                {me.country}
+                                {me.continent ? ` (${me.continent})` : ""}
+                            </Pill>
+                        )}
+                        {me.timezone && <Pill>{me.timezone}</Pill>}
+                        {me.asn && (
+                            <Pill>
+                                ASN {me.asn}
+                                {me.asOrganization ? ` (${me.asOrganization})` : ""}
+                            </Pill>
+                        )}
+                    </div>
+                )}
             </div>
 
             <div className="rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-6 shadow-sm space-y-4">

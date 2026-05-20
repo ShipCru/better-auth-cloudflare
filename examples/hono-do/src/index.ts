@@ -91,6 +91,54 @@ app.get("/protected", async c => {
 app.get("/health", c => c.json({ status: "ok" }));
 
 /**
+ * Public geo endpoint. No auth required — useful for landing pages,
+ * pre-signup forms (e.g., default the country dropdown, pick the right
+ * locale, decide which jurisdiction to route the user to before they
+ * even create an account).
+ *
+ * Returns the same `cf` block surfaced via the request to this Worker,
+ * including `colo` (the CF data-center airport code) and `region`
+ * (the in-country sub-region, e.g. "California"). All fields are
+ * nullable — Cloudflare may not populate every field for every
+ * request (private/Tor traffic, custom geolocation deals, etc.).
+ *
+ * Pair with the routing plan in the README: the response's
+ * `continent` is what the router uses to pick a jurisdiction at
+ * first-touch.
+ */
+app.get("/api/geo", c => {
+    const cf = (c.req.raw as unknown as { cf?: Record<string, unknown> }).cf ?? {};
+    const s = (k: string): string | null => {
+        const v = cf[k];
+        return typeof v === "string" ? v : null;
+    };
+    const n = (k: string): number | null => {
+        const v = cf[k];
+        return typeof v === "number" ? v : null;
+    };
+    return c.json(
+        {
+            colo: s("colo"),
+            country: s("country"),
+            continent: s("continent"),
+            region: s("region"),
+            regionCode: s("regionCode"),
+            city: s("city"),
+            postalCode: s("postalCode"),
+            timezone: s("timezone"),
+            latitude: s("latitude"),
+            longitude: s("longitude"),
+            asn: n("asn"),
+            asOrganization: s("asOrganization"),
+            // Hint useful for the multi-region router: what jurisdiction
+            // a fresh signup from this request would default to.
+            defaultJurisdiction: s("continent") === "EU" ? "eu" : "default",
+        },
+        { headers: { "cache-control": "private, max-age=30" } }
+    );
+});
+
+/**
  * Debug-only metrics endpoint. Returns the analytics dataset binding
  * status plus a sample SQL query for the Cloudflare Analytics Engine
  * API. AE doesn't expose a runtime SQL API from inside Workers — queries

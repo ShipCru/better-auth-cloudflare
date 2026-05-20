@@ -738,29 +738,67 @@ async function createUser(
     // is already taken; we surface EMAIL_ALREADY_EXISTS like the
     // IdentityDO path does.
     if (config.d1IdentityStore) {
-        // Insert FIRST: if uniqueness fails, no UserDO write to clean up.
-        const insertResult = await config.d1IdentityStore.insertOrFail(emailHash, principalId);
-        if (!insertResult.ok) {
-            log.warn("createUser email_taken_d1", {
-                emailHashShort: await shortHash(emailHash),
-            });
-            throw new Error("EMAIL_ALREADY_EXISTS");
+        // Parallel-fire the D1 INSERT and the UserDO createPrincipal call.
+        // The principalId is locally generated, so both calls are independent
+        // and have no ordering constraint. Promise.allSettled lets us see
+        // both outcomes without short-circuiting the slower call's network
+        // already-in-flight latency — the inflight call still completes
+        // even if the other rejects.
+        //
+        // Saves ~one D1 cross-region INSERT round-trip (100-300 ms) of wall
+        // time on every signup, since createPrincipal previously had to
+        // wait for INSERT to confirm before starting.
+        //
+        // Failure handling:
+        //   - INSERT rejects (UNIQUE violation): EMAIL_ALREADY_EXISTS;
+        //     roll back the principal that was created in parallel.
+        //   - createPrincipal rejects: surface the error; roll back the D1
+        //     row (disable) so the email is releasable.
+        //   - Both reject: surface the principal error and best-effort
+        //     disable the D1 row.
+        // @ts-expect-error
+        const principalCall = userStub.createPrincipal({
+            id: principalId,
+            name: (data.name as string) ?? null,
+            email,
+            emailVerified: (data.emailVerified as boolean) ?? false,
+            image: (data.image as string) ?? null,
+        }) as Promise<PrincipalRecord>;
+        const [insertSettled, principalSettled] = await Promise.allSettled([
+            config.d1IdentityStore.insertOrFail(emailHash, principalId),
+            principalCall,
+        ]);
+
+        const insertOk = insertSettled.status === "fulfilled" && insertSettled.value.ok === true;
+        const insertTaken = insertSettled.status === "fulfilled" && insertSettled.value.ok === false;
+
+        if (!insertOk) {
+            // Either UNIQUE violation or D1 down. Roll back the principal
+            // if it was created in parallel, then surface the error.
+            if (principalSettled.status === "fulfilled") {
+                // @ts-expect-error
+                await userStub.deletePrincipal().catch(() => {});
+            }
+            if (insertTaken) {
+                log.warn("createUser email_taken_d1", {
+                    emailHashShort: await shortHash(emailHash),
+                });
+                throw new Error("EMAIL_ALREADY_EXISTS");
+            }
+            const reason =
+                insertSettled.status === "rejected"
+                    ? String((insertSettled.reason as Error)?.message ?? insertSettled.reason)
+                    : "unknown";
+            throw new Error(`do-adapter: d1 identity insert failed (${reason})`);
         }
-        try {
-            // @ts-expect-error
-            const p = (await userStub.createPrincipal({
-                id: principalId,
-                name: (data.name as string) ?? null,
-                email,
-                emailVerified: (data.emailVerified as boolean) ?? false,
-                image: (data.image as string) ?? null,
-            })) as PrincipalRecord;
-            return mapPrincipalToBA(p);
-        } catch (err) {
-            // Roll back the D1 row on UserDO write failure. Best-effort.
+
+        if (principalSettled.status === "rejected") {
+            // INSERT succeeded but the DO write failed. Disable the D1 row
+            // so the email can be released; surface the DO error.
             await config.d1IdentityStore.disable(emailHash).catch(() => {});
-            throw err;
+            throw principalSettled.reason;
         }
+        return mapPrincipalToBA(principalSettled.value);
     }
 
     const idStub = config.identityDo.get(config.identityDo.idFromName(`identity:${emailHash}`));

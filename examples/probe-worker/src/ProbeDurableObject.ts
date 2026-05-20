@@ -32,7 +32,7 @@ interface Env {
     [bindingName: string]: Fetcher | unknown;
 }
 
-export type ProbeOp = "anon" | "signin" | "signup" | "get-session";
+export type ProbeOp = "anon" | "signin" | "signup" | "get-session" | "lifecycle" | "dup-signup";
 
 export interface ProbeRequest {
     bindingName: string;
@@ -41,13 +41,22 @@ export interface ProbeRequest {
     prepareSigninUser?: boolean;
 }
 
+export interface LifecyclePhase {
+    signup: number;
+    signout: number;
+    signin: number;
+}
+
 export interface ProbeResult {
     bindingName: string;
     op: ProbeOp;
     n: number;
     ok: number;
     error: number;
+    /** Per-iteration wall time. For lifecycle, total = signup + signout + signin. */
     durations: number[];
+    /** Only populated for op="lifecycle" — per-iteration breakdown. */
+    lifecycle?: LifecyclePhase[];
     min: number;
     max: number;
     mean: number;
@@ -112,19 +121,52 @@ export class ProbeDurableObject extends DurableObject<Env> {
         if (req.op === "signin" || req.prepareSigninUser) {
             signinCreds = await this.prepareUser(binding);
         }
+        // dup-signup needs a pre-existing user so each iteration's
+        // POST /sign-up/email collides with it and returns EMAIL_ALREADY_EXISTS.
+        let dupCreds: { email: string; password: string } | null = null;
+        if (req.op === "dup-signup") {
+            dupCreds = await this.prepareUser(binding);
+        }
 
         const durations: number[] = [];
+        const lifecycle: LifecyclePhase[] = [];
         let ok = 0;
         let error = 0;
         for (let i = 0; i < req.n; i++) {
             const t0 = Date.now();
             try {
-                const res = await this.callOnce(binding, req.op, i, signinCreds);
-                await res.text();
-                const dt = Date.now() - t0;
-                durations.push(dt);
-                if (res.status >= 200 && res.status < 400) ok++;
-                else error++;
+                if (req.op === "lifecycle") {
+                    const r = await this.runLifecycleOnce(binding, i);
+                    lifecycle.push(r.phase);
+                    durations.push(r.phase.signup + r.phase.signout + r.phase.signin);
+                    if (r.ok) ok++;
+                    else error++;
+                } else if (req.op === "dup-signup") {
+                    // Reuse the prepared user's email to force the
+                    // EMAIL_ALREADY_EXISTS error path. Success = error
+                    // returned (~409/422 from BA).
+                    const res = await binding.fetch(
+                        new Request("https://internal/api/auth/sign-up/email", {
+                            method: "POST",
+                            headers: { "content-type": "application/json" },
+                            body: JSON.stringify({
+                                email: dupCreds!.email,
+                                password: dupCreds!.password,
+                                name: "Dup",
+                            }),
+                        })
+                    );
+                    await res.text();
+                    durations.push(Date.now() - t0);
+                    if (res.status >= 400 && res.status < 500) ok++;
+                    else error++;
+                } else {
+                    const res = await this.callOnce(binding, req.op, i, signinCreds);
+                    await res.text();
+                    durations.push(Date.now() - t0);
+                    if (res.status >= 200 && res.status < 400) ok++;
+                    else error++;
+                }
             } catch {
                 durations.push(Date.now() - t0);
                 error++;
@@ -138,6 +180,7 @@ export class ProbeDurableObject extends DurableObject<Env> {
             ok,
             error,
             durations,
+            lifecycle: lifecycle.length > 0 ? lifecycle : undefined,
             ...stats(durations),
             colo,
             country,
@@ -172,13 +215,13 @@ export class ProbeDurableObject extends DurableObject<Env> {
         signinCreds: { email: string; password: string } | null
     ): Promise<Response> {
         type Path = { method: "POST" | "GET"; path: string; body?: string };
-        const PATHS: Record<ProbeOp, Path> = {
+        const PATHS: Partial<Record<ProbeOp, Path>> = {
             anon: { method: "POST", path: "/api/auth/sign-in/anonymous", body: "{}" },
             "get-session": { method: "GET", path: "/api/auth/get-session" },
             signup: { method: "POST", path: "/api/auth/sign-up/email" },
             signin: { method: "POST", path: "/api/auth/sign-in/email" },
         };
-        const t = PATHS[op];
+        const t = PATHS[op]!;
         let body = t.body;
         if (op === "signup") {
             const email = `regional-${Date.now()}-${i}-${crypto.randomUUID().slice(0, 8)}@probe.example`;
@@ -190,6 +233,57 @@ export class ProbeDurableObject extends DurableObject<Env> {
         return binding.fetch(
             new Request(`https://internal${t.path}`, { method: t.method, headers, body })
         ) as unknown as Response;
+    }
+
+    /**
+     * One full account lifecycle: signup → sign-out (with cookie) →
+     * sign-in (fresh email/password). Returns per-phase wall time so
+     * the bench can show where the latency actually sits for the
+     * realistic "user creates an account in their colo, comes back
+     * later, signs in from the same colo" scenario.
+     */
+    private async runLifecycleOnce(binding: Fetcher, i: number): Promise<{ phase: LifecyclePhase; ok: boolean }> {
+        const email = `lifecycle-${Date.now()}-${i}-${crypto.randomUUID().slice(0, 8)}@probe.example`;
+        const password = "probepass1234";
+        const phase: LifecyclePhase = { signup: 0, signout: 0, signin: 0 };
+        let success = true;
+
+        let t = Date.now();
+        const r1 = await binding.fetch(
+            new Request("https://internal/api/auth/sign-up/email", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ email, password, name: "L" }),
+            })
+        );
+        const cookie = r1.headers.get("set-cookie") ?? "";
+        await r1.text();
+        phase.signup = Date.now() - t;
+        if (r1.status >= 400) success = false;
+
+        t = Date.now();
+        const r2 = await binding.fetch(
+            new Request("https://internal/api/auth/sign-out", {
+                method: "POST",
+                headers: cookie ? { cookie } : {},
+            })
+        );
+        await r2.text();
+        phase.signout = Date.now() - t;
+
+        t = Date.now();
+        const r3 = await binding.fetch(
+            new Request("https://internal/api/auth/sign-in/email", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ email, password }),
+            })
+        );
+        await r3.text();
+        phase.signin = Date.now() - t;
+        if (r3.status >= 400) success = false;
+
+        return { phase, ok: success };
     }
 
     private async prepareUser(binding: Fetcher): Promise<{ email: string; password: string }> {

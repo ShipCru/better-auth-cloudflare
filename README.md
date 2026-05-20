@@ -207,18 +207,18 @@ n=30 per region per op, 2026-05-19, D1 primary in `enam` with **read replication
 
 ### Signup p50 (ms) — cold path, fresh email each iteration
 
-| variant                                     |    wnam |    enam |     sam |    weur |    eeur |     apac |       oc |      me |     afr |
-| ------------------------------------------- | ------: | ------: | ------: | ------: | ------: | -------: | -------: | ------: | ------: |
-| current (baseline)                          |    2003 |    1776 |    1768 |    1192 |    1636 |     3230 |     3570 |    1523 |    1278 |
-| thick-identity                              |    2022 |    1880 |    1881 |    1221 |    1670 |     3235 |     3596 |    1467 |    1273 |
-| fast-hash (scrypt N=4096)                   |    1805 |    1725 |    1644 |    1122 |    1528 |     3181 |     3358 |    1361 |    1126 |
-| pbkdf2-fast                                 |    1807 |    1631 |    1517 |    1096 |    1596 |     3075 |     3365 |    1354 |    1103 |
-| kv-cache                                    |    2018 |    1841 |    1811 |    1218 |    1722 |     3167 |     3582 |    1480 |    1282 |
-| stacked (fast-hash + kv-cache)              |    1821 |    1682 |    1561 |    1121 |    1509 |     3064 |     3303 |    1409 |    1123 |
-| recommended (pbkdf2 + pepper + kv + bundle) |    1775 |    1646 |    1582 |    1060 |    1469 |     3126 |     3352 |    1341 |    1102 |
-| stateless (recommended − KV session)        |    1216 |    1200 |    1098 |    1024 |    1355 |     1624 |     1727 |    1166 |    1033 |
-| d1-unique                                   |    1304 |    1163 |    1080 |     740 |     988 |     2514 |     2848 |     910 |     745 |
-| **d1-unique-stateless**                     | **752** | **654** | **555** | **668** | **832** | **1007** | **1219** | **758** | **662** |
+| variant                                     |    wnam |    enam |     sam |    weur |    eeur |    apac |      oc |      me |     afr |
+| ------------------------------------------- | ------: | ------: | ------: | ------: | ------: | ------: | ------: | ------: | ------: |
+| current (baseline)                          |    2003 |    1776 |    1768 |    1192 |    1636 |    3230 |    3570 |    1523 |    1278 |
+| thick-identity                              |    2022 |    1880 |    1881 |    1221 |    1670 |    3235 |    3596 |    1467 |    1273 |
+| fast-hash (scrypt N=4096)                   |    1805 |    1725 |    1644 |    1122 |    1528 |    3181 |    3358 |    1361 |    1126 |
+| pbkdf2-fast                                 |    1807 |    1631 |    1517 |    1096 |    1596 |    3075 |    3365 |    1354 |    1103 |
+| kv-cache                                    |    2018 |    1841 |    1811 |    1218 |    1722 |    3167 |    3582 |    1480 |    1282 |
+| stacked (fast-hash + kv-cache)              |    1821 |    1682 |    1561 |    1121 |    1509 |    3064 |    3303 |    1409 |    1123 |
+| recommended (pbkdf2 + pepper + kv + bundle) |    1775 |    1646 |    1582 |    1060 |    1469 |    3126 |    3352 |    1341 |    1102 |
+| stateless (recommended − KV session)        |    1216 |    1200 |    1098 |    1024 |    1355 |    1624 |    1727 |    1166 |    1033 |
+| d1-unique                                   |    1176 |    1108 |     982 |     629 |     871 |    2290 |    2546 |     781 |     647 |
+| **d1-unique-stateless**                     | **655** | **602** | **532** | **523** | **691** | **870** | **901** | **653** | **549** |
 
 ### Signin p50 (ms) — warm path, same user repeated
 
@@ -243,15 +243,15 @@ Direct head-to-head, signup (cold path):
 
 | region | `recommended` (IdentityDO) | `d1-unique-stateless` (D1) |   DO − D1 |
 | ------ | -------------------------: | -------------------------: | --------: |
-| wnam   |                       1775 |                        752 | **+1023** |
-| enam   |                       1646 |                        654 |  **+992** |
-| sam    |                       1582 |                        555 | **+1027** |
-| weur   |                       1060 |                        668 |  **+392** |
-| eeur   |                       1469 |                        832 |  **+637** |
-| apac   |                       3126 |                       1007 | **+2119** |
-| oc     |                       3352 |                       1219 | **+2133** |
-| me     |                       1341 |                        758 |  **+583** |
-| afr    |                       1102 |                        662 |  **+440** |
+| wnam   |                       1775 |                        655 | **+1120** |
+| enam   |                       1646 |                        602 | **+1044** |
+| sam    |                       1582 |                        532 | **+1050** |
+| weur   |                       1060 |                        523 |  **+537** |
+| eeur   |                       1469 |                        691 |  **+778** |
+| apac   |                       3126 |                        870 | **+2256** |
+| oc     |                       3352 |                        901 | **+2451** |
+| me     |                       1341 |                        653 |  **+688** |
+| afr    |                       1102 |                        549 |  **+553** |
 
 Direct head-to-head, signin (warm hot path):
 
@@ -275,9 +275,85 @@ The single counter-argument for IdentityDO: it survives the D1 primary region fa
 
 `POST /probe { variantId, op, n }` against `examples/probe-worker`, which fans out to `ProbeDurableObject`s pinned via `locationHint` in nine CF regions. Each region runs `n` sequential calls against the variant's service binding. Sources: `/tmp/bench-h2h-*-{signup,signin}.json`. Re-run via `/tmp/bench-headtohead.sh`.
 
+## Signup request path — full inventory
+
+End-to-end trace of `POST /api/auth/sign-up/email` for the `d1-unique-stateless` variant (the production target). All times are measured in the n=30 bench unless noted.
+
+| #   | step                                                                                         | who                                                                           | typical cost                                                                                                                                                    | parallelizable?                                                                                                                      |
+| --- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| 1   | Edge → Hono Worker isolate boot, request middleware, geo enrichment                          | CF + our request middleware                                                   | 1–5 ms                                                                                                                                                          | n/a                                                                                                                                  |
+| 2   | BA `adapter.findOne(user, where: {email})` — _pre-existence check_                           | adapter `findOne`                                                             | **0 ms** (we short-circuit and return `null`; the authoritative check is the D1 INSERT in step 5)                                                               | already optimized                                                                                                                    |
+| 3   | BA generates `principalId = randomUUID()`                                                    | BA core                                                                       | <1 ms                                                                                                                                                           | n/a                                                                                                                                  |
+| 4   | BA `password.hash(plain)` — PBKDF2/scrypt                                                    | BA + our `pbkdf2-hash.ts` (with HMAC pepper)                                  | 50–150 ms PBKDF2 native; 150–600 ms scrypt JS                                                                                                                   | CPU-bound, can't parallelize with itself but can run in parallel with step 5 (not yet wired — see "What still isn't parallel" below) |
+| 5   | BA `adapter.create({ model: "user", data })` → `createUser()`                                | adapter; now uses `Promise.allSettled([d1.INSERT, userStub.createPrincipal])` | INSERT 100–300 ms cross-region to enam primary; createPrincipal 5–30 ms warm DO RPC. With `allSettled` parallel, wall = `max(INSERT, createPrincipal)` ≈ INSERT | **yes, NEW** — `Promise.allSettled` in `do.ts` `createUser` (d1-unique path)                                                         |
+| 6   | BA `adapter.create({ model: "account", data })` → `userStub.createAccount`                   | UserDO RPC                                                                    | 5–30 ms warm                                                                                                                                                    | sequential (account row links to user.id from step 5)                                                                                |
+| 7   | BA writes session via secondaryStorage (KV PUT) — **skipped** when `USE_STATELESS_SESSION=1` | KV                                                                            | 50–200 ms cross-region (default); **0 ms** (stateless)                                                                                                          | already optimized — stateless skips it                                                                                               |
+| 8   | BA signs session_data cookie (HMAC-SHA-256)                                                  | BA core                                                                       | <2 ms                                                                                                                                                           | n/a                                                                                                                                  |
+| 9   | Hono response middleware logs request timing                                                 | our `requestTimingMiddleware`                                                 | <1 ms                                                                                                                                                           | n/a                                                                                                                                  |
+| 10  | (deferred via `waitUntil`) identity_index KV+D1 upsert                                       | adapter                                                                       | runs after response returns                                                                                                                                     | already optimized                                                                                                                    |
+| 11  | (deferred via `waitUntil`) thick_cache fan-out to IdentityDO                                 | adapter                                                                       | runs after response returns; only when `USE_THICK_IDENTITY=1`                                                                                                   | already optimized                                                                                                                    |
+| 12  | (deferred via UserDO outbox + alarm) `users`+`accounts` mirror to D1                         | UserDO outbox                                                                 | runs in DO background, target <10 s lag                                                                                                                         | already async                                                                                                                        |
+
+**Critical-path total for `d1-unique-stateless` warm:** `~10 ms boot` + `~80 ms hash` + `max(150 ms INSERT, 15 ms createPrincipal)` + `~10 ms createAccount` + `~5 ms cookie` ≈ **250–300 ms** local-primary, **600–900 ms** when the D1 primary is across an ocean. Bench p50 sits around 550–800 ms warm, matching.
+
+### What is now parallel (this PR)
+
+- **Step 5 — `Promise.allSettled([d1.INSERT, userStub.createPrincipal])`**: independent operations (the principalId is locally generated), run in parallel. Failure of either rolls back the other. Saves ~one D1 cross-region round-trip (100–300 ms) of wall time.
+- **Steps 10, 11, 12** — non-critical writes are dispatched via `ctx.waitUntil` so the client response doesn't wait.
+
+### What still isn't parallel (worth measuring next)
+
+- **Step 4 (hash) ‖ step 5 (INSERT + createPrincipal).** BA hashes BEFORE calling `adapter.create`, so we can't see the INSERT coming when the hash starts. Could be unlocked by monkey-patching `password.hash` to kick off a pre-INSERT for a deterministic principalId before the hash returns. Risk: the INSERT runs even if BA later rejects (rare validation failure path) → orphaned identity rows. Mitigated by a TTL-based sweep, but adds complexity. Expected win: 50–150 ms.
+- **Step 5 INSERT ‖ step 6 createAccount.** account creation depends on the user row existing in the DO (step 5's createPrincipal). If we relaxed that (the DO accepts an account write keyed by principalId even before createPrincipal lands), step 5's INSERT and step 6 could run together. Expected win: 5–30 ms warm, more cold.
+- **`Promise.race` for D1 INSERT against a KV optimistic-uniqueness pre-check**: if KV `identity_index` has the email cached as "taken," fail fast at ~5–30 ms global without ever calling D1. Real uniqueness still enforced by the D1 INSERT in the not-cached case. Win on the dup-email path: ~500 ms → ~30 ms (see `dup-signup` bench numbers below). Win on the unique-email path: 0 (still has to wait for INSERT).
+
+### Lifecycle (`signup → signout → signin` same-colo) p50, ms
+
+The most realistic per-user workload: a user signs up, signs out, then comes back later and signs in — typically from the same colo. n=30, fresh email per iteration, all three calls execute against the same ProbeDurableObject (same colo).
+
+| variant                 |    wnam |    enam |     sam |    weur |    eeur |     apac |       oc |      me |     afr |
+| ----------------------- | ------: | ------: | ------: | ------: | ------: | -------: | -------: | ------: | ------: |
+| current                 |    2681 |    2416 |    2380 |    1513 |    1990 |     4750 |     5293 |    1851 |    1662 |
+| thick-identity          |       ~ |    2418 |    2319 |    1505 |    1962 |     4629 |     5258 |    1804 |    1652 |
+| fast-hash               |    2273 |    2176 |    2015 |    1279 |    2006 |     4480 |     4851 |    1613 |    1309 |
+| pbkdf2-fast             |    2386 |    2167 |    2130 |    1444 |    1964 |     4424 |     4834 |    1683 |    1530 |
+| kv-cache                |    2828 |    2425 |    2490 |    1533 |    2044 |     4716 |     5296 |    1768 |    1667 |
+| stacked                 |    2288 |    2154 |    2005 |    1290 |    1947 |     4401 |     4776 |    1596 |    1341 |
+| recommended             |    2273 |    2226 |    2017 |    1212 |    1983 |     4409 |     4792 |    1573 |    1257 |
+| stateless               |    1400 |    1374 |    1250 |    1062 |    1432 |     2047 |     2113 |    1294 |    1116 |
+| d1-unique               |    1713 |    1576 |    1456 |     753 |    1095 |     3754 |     4001 |     957 |     802 |
+| **d1-unique-stateless** | **701** | **717** | **631** | **606** | **765** | **1010** | **1004** | **686** | **624** |
+
+d1-unique-stateless beats every other variant in every region. The signout phase is ~0 ms across all variants (BA's sign-out is just cookie expiry). Signin median for d1-unique-stateless is **14–125 ms** in lifecycle — the same-iteration sign-in benefits from warm DOs + warm KV cache populated by the matching signup.
+
+### EMAIL_ALREADY_EXISTS path (`dup-signup` bench)
+
+n=30 per region, 2026-05-19, pre-created user then dup-signup repeats.
+
+| variant                 |    wnam |    enam |     sam |    weur |    eeur |    apac |      oc |      me |     afr |
+| ----------------------- | ------: | ------: | ------: | ------: | ------: | ------: | ------: | ------: | ------: |
+| current                 |      21 |      13 |      26 |      26 |      10 |      82 |      44 |      32 |      30 |
+| thick-identity          |      17 |      42 |      29 |      13 |      10 |      30 |      50 |       9 |      32 |
+| fast-hash               |       9 |      30 |      27 |      12 |      19 |      11 |      35 |      26 |      15 |
+| pbkdf2-fast             |      17 |      29 |      23 |       9 |       5 |       7 |      13 |      24 |      11 |
+| kv-cache                |      18 |      42 |      20 |      14 |      38 |      31 |      53 |      36 |      15 |
+| stacked                 |      11 |       9 |      27 |      15 |      16 |       6 |      38 |      25 |      13 |
+| recommended             |      16 |       8 |      23 |       7 |       6 |      21 |      33 |      22 |      13 |
+| stateless               |      14 |      27 |      13 |       7 |      33 |       7 |      14 |      25 |       9 |
+| **d1-unique**           | **670** | **622** | **552** | **538** | **661** | **875** | **892** | **610** | **532** |
+| **d1-unique-stateless** | **646** | **614** | **519** | **511** | **669** | **873** | **894** | **613** | **537** |
+
+**Surprise finding.** All IdentityDO-based variants fail-fast on dup-email (5–82 ms p50 global) because BA's signup flow does an early `findOne(user, {email}, join.account)` that hits IdentityDO/KV cache and finds the existing user — BA short-circuits _before_ hashing the password. The D1-unique variants pay the full hash + INSERT-fail cost (510–894 ms) because the corresponding D1 short-circuit isn't wired into the no-join-account skip path.
+
+**Fix (recommended for the next PR).** Wire a `Promise.race` style early-out in the `findOne(email, no-join)` skip path when `d1IdentityStore` is set: race the D1 lookup (cached in KV identity_index when warm) against `null`-after-`50 ms`. Cache hit → return the existing user → BA short-circuits without hashing. Cost on the happy path: ~5–30 ms per signup (KV GET). Saved on dup-email: ~500 ms. Net win once dup rate × saving > happy rate × cost, i.e. dup rate ≳ 6 % (or always if you care about the dup UX more than the absolute warm signup floor).
+
+Worth noting: this is the kind of place `Promise.allSettled` and `Promise.race` actually pay off. The "race the cheap-fast check against the expensive-slow path" pattern is a clean fit: don't _wait_ for D1 if KV says "definitely taken"; don't _wait_ for KV if D1 says "definitely missing"; the slower of the two becomes inactive once a winner is known.
+
 ## Multi-region D1 + jurisdiction routing plan
 
-**Priority order.** `enam` first (done — D1 primary moved, read replication on `auto`), `weur` next for EU residency, then sharding inside each jurisdiction.
+**Updated scope (simplified).** Jurisdiction routing is **optional and EU-opt-in only**. Phase 2 ships a second D1 in `weur` for EU-resident principals; everyone else stays on the single default D1 (currently `enam`, can be anywhere). Sharded NA and full multi-region matrix are deferred until traffic demands it.
+
+**Priority order.** `enam` first (done — D1 primary moved, read replication on `auto`), then `weur` as an opt-in EU jurisdiction, then sharding inside `weur` only if data volume warrants it.
 
 **Current state.** A single D1 (`ba-cf-do-recovery-enam`, primary in `enam`, **read replication enabled — `mode: auto`**) holds three tables:
 
@@ -352,6 +428,90 @@ The hard part of multi-region isn't the data layout — it's making sure every s
 **Why service bindings over public-domain hops.** Worker-to-Worker service bindings are in-isolate (no DNS, no TLS, no HTTP overhead) and stay inside Cloudflare's network. A router fanning out to 3–5 shards over service bindings adds ~1–2 ms; fanning out over public HTTPS would add ~20–50 ms. Strict residency: service bindings between Workers in the same Cloudflare account; no data crosses the public internet.
 
 **SDK story.** The client SDK doesn't need to know about jurisdictions or shards. The router is the only thing the SDK talks to (single CNAME, single base URL). All routing is server-side. The single side-effect the SDK must handle is a 308-redirect if the router decides to short-circuit cross-region (e.g., if an `na`-resident's session somehow lands on the EU edge, the router _could_ 308 to `na.auth.example.com` to avoid every NA-resident's session bouncing through the EU edge — but v1 just pays the in-network proxy cost and keeps one public domain).
+
+### Setting cookie's `homeJurisdiction` + `homeShard` on the initial request
+
+CF gives us three relevant signals on every request: `cf.continent` (NA/EU/AS/…), `cf.country` (ISO-2), `cf.colo` (airport code, ~300 values). The mapping for "one shard per region" reuses the same 9-region scheme as `examples/probe-worker/src/regions.ts` (`wnam`, `enam`, `sam`, `weur`, `eeur`, `apac`, `oc`, `me`, `afr`).
+
+Initial-request flow on signup (no cookie yet):
+
+```ts
+// Router worker — pseudocode
+const continent = c.req.raw.cf?.continent; // "NA" | "EU" | ...
+const colo = c.req.raw.cf?.colo; // "LHR" | "SJC" | ...
+
+// 1) jurisdiction = law-grade boundary; never derived from colo, only continent
+const jurisdiction: "na" | "eu" = continent === "EU" ? "eu" : "na";
+
+// 2) shard within jurisdiction = perf boundary; derived from colo
+const shard = pickShardFromColo(colo, jurisdiction); // → "weur" | "enam" | ...
+
+// 3) forward to the matching backend Worker via service binding
+const backend = env[`AUTH_${jurisdiction.toUpperCase()}_${shard.toUpperCase()}`];
+
+// 4) The backend creates the principal, includes home claims in the
+//    signed session_data cookie BA already issues:
+//    session_data = HMAC-signed JSON({ principalId, homeJurisdiction, homeShard, ... })
+```
+
+`cf.continent` is what we map jurisdictions from — it's a continent, not a colo, so a Tokyo coffee-shop wifi for a German user _does not_ incorrectly route them to EU based on geo: that user picked `homeJurisdiction = "eu"` at signup, the cookie carries it, the router honours the cookie. `cf.colo` is only used to pick a SHARD when _creating_ the principal (i.e., where to physically put their data inside the EU jurisdiction).
+
+For users who need explicit residency control (legal residency ≠ where they happened to sign up), expose `X-Auth-Jurisdiction: eu` as a header the SDK can set. The router prefers the header over `cf.continent` for first-touch routing.
+
+### Why not KV for uniqueness (KV is unsafe as a source of truth)
+
+KV is fast: 5–30 ms per GET globally, write-anywhere. But KV is **eventually consistent across regions**, and the inter-region propagation window is ~10–60 s. That breaks uniqueness:
+
+```
+t=0   user A in LHR signs up alice@x.com
+       LHR worker: kv.get('email:alice@x.com') → null
+       LHR worker: kv.put('email:alice@x.com', { principalId: 'A' })
+t=1   user B in NRT signs up alice@x.com (KV write hasn't propagated yet)
+       NRT worker: kv.get('email:alice@x.com') → null
+       NRT worker: kv.put('email:alice@x.com', { principalId: 'B' })
+t=30  both writes settle; one wins, the other is silently lost.
+       Two principals now both think they own alice@x.com.
+```
+
+D1's `UNIQUE` constraint and IdentityDO's `blockConcurrencyWhile()` both serialize through a single point (the D1 primary or the per-emailHash DO instance), so the second writer sees the first one's write and fails fast.
+
+**The right hybrid: KV in front of D1 (or DO), never on its own.**
+
+| layer                                               | role                                                           | consistency                                                         | latency                |
+| --------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------- | ---------------------- |
+| KV `identity_index`                                 | cache for read-side `email → principal_id` lookups             | eventual; tolerates drift because the underlying D1/DO is the floor | 5–30 ms global         |
+| D1 `identity_unique` _or_ IdentityDO                | authoritative uniqueness check at signup INSERT/reserve time   | strong (serialized at primary)                                      | 80–300 ms cross-region |
+| KV `identity_directory` _(multi-jurisdiction only)_ | routing oracle: `email → { jurisdiction, shard, principalId }` | eventual; safe because miss falls back to per-jurisdiction fan-out  | 5–30 ms global         |
+
+Combining these is exactly what `recommended`, `stacked`, and the `d1-unique` family already do: KV is a read accelerator; D1/DO is the consistency floor. We're already running the safe hybrid.
+
+If you want to bench "what if uniqueness was just KV?" — the bench would show ~5–30 ms uniqueness checks (excellent), but a small percentage of concurrent dup-email signups would silently both succeed. Correctness loss for ~50 ms saved. Not worth it.
+
+### Scaling — how many principals fit in a single deployment
+
+Per-component ceilings on the current default config:
+
+| component                                  | per-instance ceiling                               | unit cost                                       | bottleneck                                                              |
+| ------------------------------------------ | -------------------------------------------------- | ----------------------------------------------- | ----------------------------------------------------------------------- |
+| UserDO (1 per principal)                   | 10 GB SQLite per DO, billions of DOs per namespace | a typical principal record + accounts ≈ 1–10 KB | unbounded for practical purposes; account-level billing is the real cap |
+| IdentityDO (1 per emailHash)               | 10 GB SQLite per DO, billions per namespace        | a few hundred bytes per entry                   | same                                                                    |
+| D1 `identity_unique`                       | 10 GB per database (D1 hard cap)                   | ~60 B per row                                   | ≈ **170 M emails per D1**                                               |
+| D1 `users` + `accounts` (DR mirror)        | 10 GB per database                                 | ~250 B per principal across both tables         | ≈ **40 M principals per D1**                                            |
+| D1 write QPS                               | ~1 000 sustained per primary                       | one signup ≈ 2–3 writes                         | ≈ **300–500 sustained signups/sec per shard**                           |
+| KV `identity_index` / `identity_directory` | no documented row limit                            | ~80 B per key+value                             | billions of keys per namespace                                          |
+| KV ops                                     | 1 000 reads/sec free, much higher paid             | one signin ≈ 1 KV GET                           | tens of thousands of sustained signins/sec per namespace                |
+
+**Single-shard ceiling:** the `users`+`accounts` D1 caps first, at ~40 M principals. Once a shard nears that:
+
+1. Add a new shard. New signups in that region land on the new shard.
+2. Old principals stay on their original shard forever — no migration. Router knows from the cookie which shard each principal lives on.
+3. With 9 region-shards per jurisdiction and 2 jurisdictions, that's 18 × 40 M ≈ **720 M principals** before we'd need a _second_ shard per region.
+
+**Identity index ceiling:** ~170 M emails per identity D1. When approached, shard the identity table by `hash(email_hash) % N` — each jurisdiction can have N identity shards. Lookups fan out (parallel `Promise.all`) but the directory cache in KV makes the hot path one KV GET regardless.
+
+**Per-UserDO ceiling:** 10 GB SQLite. A pathologically active principal (lots of OAuth accounts, large session history if stored in the DO) is still <100 MB realistically. Cap is irrelevant for typical users.
+
+**Practical guidance.** A single-jurisdiction deployment with one D1 primary handles ~40 M users comfortably; the multi-region plan above scales linearly with shards (~720 M users at 18 shards) before structural work is needed. Beyond that, shard the identity table.
 
 ### Phase 4 — open questions deliberately deferred
 

@@ -427,7 +427,7 @@ dataset = "ba_cf_do_events"
 
 [[env.d1_unique_stateless.d1_databases]]
 binding = "AUTH_DB"
-database_name = "ba-cf-do-recovery"
+database_name = "ba-cf-do-recovery-enam"
 database_id = "00000000-0000-0000-0000-000000000000"
 
 # Same as d1_unique_stateless but with the D1 primary in APAC instead

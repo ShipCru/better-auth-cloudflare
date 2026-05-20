@@ -404,6 +404,11 @@ USE_PBKDF2 = "1"
 USE_D1_IDENTITY = "1"
 USE_BUNDLE_RPC = "1"
 USE_STATELESS_SESSION = "1"
+# Enables KV identity_index cache. With this on, signup write-through
+# populates the cache so subsequent dup-email signups hit the KV
+# pre-check in do.ts findOne and fail fast at ~5-30 ms instead of
+# paying the full hash + INSERT-fail cost (~500-900 ms without it).
+USE_KV_CACHE = "1"
 
 [[env.d1_unique_stateless.durable_objects.bindings]]
 name = "USER_DO"

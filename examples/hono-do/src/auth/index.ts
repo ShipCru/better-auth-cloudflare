@@ -176,9 +176,11 @@ function createAuth(
         // writes off the response critical path.
         secondaryStorage: stateless
             ? noopSecondaryStorage
-            : deferredWritesCtx
-              ? wrapDeferredKv(wrapped.secondaryStorage, deferredWritesCtx)
-              : wrapped.secondaryStorage,
+            : wrapWithIsolateL1(
+                  deferredWritesCtx
+                      ? wrapDeferredKv(wrapped.secondaryStorage, deferredWritesCtx)
+                      : wrapped.secondaryStorage
+              ),
         session: {
             ...wrapped.session,
             storeSessionInDatabase: false,
@@ -224,6 +226,70 @@ const noopSecondaryStorage = {
  *  - In stateless mode we don't use secondaryStorage at all, so this
  *    wrapper only applies to KV-backed deploys.
  */
+/**
+ * In-isolate L1 cache in front of KV `secondaryStorage.get`. Stores
+ * each value with a short TTL (30 s by default — short enough that a
+ * stale session is bounded to 30 s after revocation, long enough that
+ * same-isolate repeat reads on a page-load burst skip KV entirely).
+ *
+ * Cloudflare Workers reuses the same V8 isolate across many requests
+ * (Fluid Compute keeps isolates warm for minutes), so a Map declared at
+ * the module scope persists across requests within the same colo's
+ * isolate. The cache is per-isolate; cross-isolate misses still hit KV.
+ *
+ * Invalidation: `set` and `delete` evict the local entry first, so the
+ * same-isolate next read sees the new value (or null) immediately. KV's
+ * own cross-region eventual consistency is unchanged.
+ *
+ * Saves ~5–15 ms per repeat `get-session` call (KV warm reads are ~5–30 ms
+ * within a region; the L1 hit is sub-millisecond).
+ */
+const L1_TTL_MS = 30 * 1000;
+const l1Cache = new Map<string, { value: string | null; expiresAt: number }>();
+function l1Get(key: string): string | null | undefined {
+    const hit = l1Cache.get(key);
+    if (!hit) return undefined;
+    if (hit.expiresAt < Date.now()) {
+        l1Cache.delete(key);
+        return undefined;
+    }
+    return hit.value;
+}
+function l1Set(key: string, value: string | null): void {
+    l1Cache.set(key, { value, expiresAt: Date.now() + L1_TTL_MS });
+}
+function l1Delete(key: string): void {
+    l1Cache.delete(key);
+}
+function wrapWithIsolateL1<T extends { get: unknown; set: unknown; delete: unknown }>(
+    base: T | undefined
+): T | undefined {
+    if (!base) return base;
+    const getFn = (base as unknown as { get: (k: string) => Promise<string | null> }).get;
+    const setFn = (base as unknown as { set: (k: string, v: string, t?: number) => Promise<void> }).set;
+    const delFn = (base as unknown as { delete: (k: string) => Promise<void> }).delete;
+    return {
+        ...base,
+        get: (async (key: string) => {
+            const cached = l1Get(key);
+            if (cached !== undefined) return cached;
+            const value = await getFn.call(base, key);
+            l1Set(key, value);
+            return value;
+        }) as unknown as T["get"],
+        set: ((key: string, value: string, ttl?: number) => {
+            // Update L1 first so same-isolate reads see the new value
+            // immediately, even though the underlying KV PUT may be deferred.
+            l1Set(key, value);
+            return setFn.call(base, key, value, ttl);
+        }) as unknown as T["set"],
+        delete: ((key: string) => {
+            l1Delete(key);
+            return delFn.call(base, key);
+        }) as unknown as T["delete"],
+    };
+}
+
 function wrapDeferredKv<T extends { get: unknown; set: unknown; delete: unknown }>(
     base: T,
     ctx: { waitUntil(p: Promise<unknown>): void }

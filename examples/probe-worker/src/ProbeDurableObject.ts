@@ -32,7 +32,7 @@ interface Env {
     [bindingName: string]: Fetcher | unknown;
 }
 
-export type ProbeOp = "anon" | "signin" | "signup" | "get-session" | "lifecycle" | "dup-signup";
+export type ProbeOp = "anon" | "signin" | "signup" | "get-session" | "lifecycle" | "dup-signup" | "signout";
 
 export interface ProbeRequest {
     bindingName: string;
@@ -127,6 +127,14 @@ export class ProbeDurableObject extends DurableObject<Env> {
         if (req.op === "dup-signup") {
             dupCreds = await this.prepareUser(binding);
         }
+        // signout needs a fresh signed-in session per iteration (otherwise
+        // the same cookie races itself). We prepare ONE user and create a
+        // fresh session per iteration via /sign-in/email, then immediately
+        // /sign-out — measuring only the signout call.
+        let signoutCreds: { email: string; password: string } | null = null;
+        if (req.op === "signout") {
+            signoutCreds = await this.prepareUser(binding);
+        }
 
         const durations: number[] = [];
         const lifecycle: LifecyclePhase[] = [];
@@ -140,6 +148,37 @@ export class ProbeDurableObject extends DurableObject<Env> {
                     lifecycle.push(r.phase);
                     durations.push(r.phase.signup + r.phase.signout + r.phase.signin);
                     if (r.ok) ok++;
+                    else error++;
+                } else if (req.op === "signout") {
+                    // Sign in to get a fresh cookie, then immediately sign out.
+                    // We measure ONLY the signout call (t0 reset after signin).
+                    const inRes = await binding.fetch(
+                        new Request("https://internal/api/auth/sign-in/email", {
+                            method: "POST",
+                            headers: { "content-type": "application/json" },
+                            body: JSON.stringify({
+                                email: signoutCreds!.email,
+                                password: signoutCreds!.password,
+                            }),
+                        })
+                    );
+                    const cookie = inRes.headers.get("set-cookie") ?? "";
+                    await inRes.text();
+                    const tOut = Date.now();
+                    const outRes = await binding.fetch(
+                        new Request("https://internal/api/auth/sign-out", {
+                            method: "POST",
+                            headers: {
+                                "content-type": "application/json",
+                                origin: "https://better-auth-cloudflare-hono-do.steve-4b7.workers.dev",
+                                ...(cookie ? { cookie } : {}),
+                            },
+                            body: "{}",
+                        })
+                    );
+                    await outRes.text();
+                    durations.push(Date.now() - tOut);
+                    if (outRes.status >= 200 && outRes.status < 400) ok++;
                     else error++;
                 } else if (req.op === "dup-signup") {
                     // Reuse the prepared user's email to force the
@@ -265,7 +304,12 @@ export class ProbeDurableObject extends DurableObject<Env> {
         const r2 = await binding.fetch(
             new Request("https://internal/api/auth/sign-out", {
                 method: "POST",
-                headers: cookie ? { cookie } : {},
+                headers: {
+                    "content-type": "application/json",
+                    origin: "https://better-auth-cloudflare-hono-do.steve-4b7.workers.dev",
+                    ...(cookie ? { cookie } : {}),
+                },
+                body: "{}",
             })
         );
         await r2.text();

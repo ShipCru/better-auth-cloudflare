@@ -65,8 +65,16 @@ export default function BenchPage() {
     const [rows, setRows] = useState<RunRow[]>([]);
     const [regionalRows, setRegionalRows] = useState<RegionalRow[]>([]);
     const [runningRegional, setRunningRegional] = useState(false);
-    const [regionalOp, setRegionalOp] = useState<"signin" | "signup" | "anon" | "get-session">("signin");
+    const [regionalOp, setRegionalOp] = useState<
+        "signin" | "signup" | "anon" | "get-session" | "signout" | "dup-signup" | "lifecycle"
+    >("signin");
     const [me, setMe] = useState<MeGeo | null>(null);
+    const [runAllProgress, setRunAllProgress] = useState<{
+        running: boolean;
+        total: number;
+        done: number;
+        current: string | null;
+    }>({ running: false, total: 0, done: 0, current: null });
 
     useEffect(() => {
         let cancelled = false;
@@ -109,6 +117,53 @@ export default function BenchPage() {
             setError((err as Error).message);
         } finally {
             setRunningRegional(false);
+        }
+    }
+
+    /**
+     * Run every variant × every op against the regional probe-worker,
+     * one combination at a time but launching all 10 variants in
+     * parallel per op (the probe-worker fans regions out internally
+     * via Promise.all). Updates the progress meter as each combination
+     * completes; results land in the regional results table.
+     */
+    async function runAll() {
+        const ops: (typeof regionalOp)[] = ["signup", "signin", "signout", "dup-signup", "lifecycle", "get-session"];
+        const variants = BACKEND_VARIANTS.map(v => ({ id: v.id, label: v.label }));
+        const total = ops.length * variants.length;
+        setRunAllProgress({ running: true, total, done: 0, current: null });
+        setError(null);
+        try {
+            for (const op of ops) {
+                const results = await Promise.allSettled(
+                    variants.map(async v => {
+                        setRunAllProgress(p => ({ ...p, current: `${op} | ${v.id}` }));
+                        const res = await fetch("/api/bench/regional", {
+                            method: "POST",
+                            headers: { "content-type": "application/json" },
+                            body: JSON.stringify({ variantId: v.id, op, n }),
+                        });
+                        const data = await res.json();
+                        return { v, data };
+                    })
+                );
+                const newRows: RegionalRow[] = [];
+                for (const r of results) {
+                    if (r.status === "fulfilled" && !r.value.data?.error) {
+                        newRows.push({
+                            ...r.value.data,
+                            variantId: r.value.v.id as VariantId,
+                            variantLabel: r.value.v.label,
+                        });
+                    }
+                }
+                setRegionalRows(prev => [...newRows, ...prev]);
+                setRunAllProgress(p => ({ ...p, done: p.done + variants.length, current: null }));
+            }
+        } catch (err) {
+            setError((err as Error).message);
+        } finally {
+            setRunAllProgress(p => ({ ...p, running: false, current: null }));
         }
     }
 
@@ -237,26 +292,63 @@ export default function BenchPage() {
                         >
                             <option value="signin">signin (warm, same user)</option>
                             <option value="signup">signup (fresh user each iter)</option>
+                            <option value="signout">signout (cookie + KV DELETE)</option>
+                            <option value="dup-signup">dup-signup (EMAIL_ALREADY_EXISTS path)</option>
+                            <option value="lifecycle">lifecycle (signup → signout → signin same colo)</option>
                             <option value="anon">anon sign-in</option>
                             <option value="get-session">get-session</option>
                         </select>
                     </div>
                     <button
                         onClick={runOne}
-                        disabled={running || runningRegional}
+                        disabled={running || runningRegional || runAllProgress.running}
                         className="rounded-md bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-4 py-2 text-sm font-medium transition-colors"
                     >
                         {running ? "Running…" : "Run (this colo)"}
                     </button>
                     <button
                         onClick={runRegional}
-                        disabled={running || runningRegional}
+                        disabled={running || runningRegional || runAllProgress.running}
                         title="Fan out to every Cloudflare region via locationHint-pinned Durable Objects"
                         className="rounded-md bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-4 py-2 text-sm font-medium transition-colors"
                     >
                         {runningRegional ? "Probing all regions…" : `Run ${regionalOp} from all 9 regions`}
                     </button>
+                    <button
+                        onClick={runAll}
+                        disabled={running || runningRegional || runAllProgress.running}
+                        title="Run every op against every variant from every region. 60 combinations × 9 regions × N iterations. Variants in parallel per op."
+                        className="rounded-md bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white px-4 py-2 text-sm font-medium transition-colors"
+                    >
+                        {runAllProgress.running
+                            ? `${runAllProgress.done}/${runAllProgress.total} (${runAllProgress.current ?? "…"})`
+                            : "Run ALL (every op × every variant)"}
+                    </button>
                 </div>
+
+                {runAllProgress.running && (
+                    <div className="rounded-md border border-purple-200 dark:border-purple-900 bg-purple-50 dark:bg-purple-950/40 px-3 py-2 text-xs space-y-1">
+                        <div className="flex items-center justify-between">
+                            <span className="font-semibold text-purple-900 dark:text-purple-200">Run-all progress</span>
+                            <span className="text-purple-700 dark:text-purple-300">
+                                {runAllProgress.done} / {runAllProgress.total} combinations
+                            </span>
+                        </div>
+                        <div className="h-2 w-full overflow-hidden rounded bg-purple-200 dark:bg-purple-900">
+                            <div
+                                className="h-full bg-purple-600 transition-all"
+                                style={{
+                                    width: `${(runAllProgress.done / Math.max(1, runAllProgress.total)) * 100}%`,
+                                }}
+                            />
+                        </div>
+                        {runAllProgress.current && (
+                            <div className="text-purple-700 dark:text-purple-300">
+                                in-flight: {runAllProgress.current}
+                            </div>
+                        )}
+                    </div>
+                )}
 
                 {error && (
                     <div className="rounded-md bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-900 text-red-800 dark:text-red-200 px-3 py-2 text-sm">

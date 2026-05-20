@@ -167,7 +167,18 @@ function createAuth(
         // no-op makes BA's session writes a fire-and-forget — the signed
         // session_data cookie carries the actual session state, and
         // get-session reads cookieCache only.
-        secondaryStorage: stateless ? noopSecondaryStorage : wrapped.secondaryStorage,
+        //
+        // For stateful variants: wrap secondaryStorage so `set` and
+        // `delete` defer via waitUntil when an execution ctx is provided.
+        // Reads stay sync (BA depends on them returning the value). Saves
+        // ~50–100 ms on signin (the KV PUT for the new session) and on
+        // sign-out (the KV DELETE for the old session) by moving those
+        // writes off the response critical path.
+        secondaryStorage: stateless
+            ? noopSecondaryStorage
+            : deferredWritesCtx
+              ? wrapDeferredKv(wrapped.secondaryStorage, deferredWritesCtx)
+              : wrapped.secondaryStorage,
         session: {
             ...wrapped.session,
             storeSessionInDatabase: false,
@@ -194,6 +205,43 @@ const noopSecondaryStorage = {
     set: async (_key: string, _value: string, _ttl?: number) => undefined as void,
     delete: async (_key: string) => undefined as void,
 };
+
+/**
+ * Wraps BA's secondaryStorage so writes (`set`, `delete`) dispatch via
+ * `ctx.waitUntil` and return immediately. Reads stay synchronous because
+ * BA's get-session and verification flows need the value back.
+ *
+ * Safe trade-off:
+ *  - signup/signin response returns ~50–100 ms faster (no KV PUT in
+ *    the critical path).
+ *  - sign-out response returns ~50–100 ms faster (no KV DELETE).
+ *  - For ~5–30 ms after the response, a different colo's get-session
+ *    that hits the just-written key may briefly see stale data — KV
+ *    propagation is eventually consistent regardless.
+ *  - Edge case: if the same colo immediately re-reads the key within
+ *    the same isolate (rare), it will hit the in-flight PUT; CF
+ *    serializes per-key writes per region.
+ *  - In stateless mode we don't use secondaryStorage at all, so this
+ *    wrapper only applies to KV-backed deploys.
+ */
+function wrapDeferredKv<T extends { get: unknown; set: unknown; delete: unknown }>(
+    base: T,
+    ctx: { waitUntil(p: Promise<unknown>): void }
+): T {
+    const setFn = (base as unknown as { set: (k: string, v: string, t?: number) => Promise<void> }).set;
+    const delFn = (base as unknown as { delete: (k: string) => Promise<void> }).delete;
+    return {
+        ...base,
+        set: ((key: string, value: string, ttl?: number) => {
+            ctx.waitUntil(setFn.call(base, key, value, ttl));
+            return Promise.resolve();
+        }) as unknown as T["set"],
+        delete: ((key: string) => {
+            ctx.waitUntil(delFn.call(base, key));
+            return Promise.resolve();
+        }) as unknown as T["delete"],
+    };
+}
 
 export const auth = createAuth();
 export { createAuth };

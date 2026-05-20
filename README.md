@@ -220,20 +220,58 @@ n=30 per region per op, 2026-05-19, D1 primary in `enam` with **read replication
 | d1-unique                                   |    1176 |    1108 |     982 |     629 |     871 |    2290 |    2546 |     781 |     647 |
 | **d1-unique-stateless**                     | **655** | **602** | **532** | **523** | **691** | **870** | **901** | **653** | **549** |
 
-### Signin p50 (ms) — warm path, same user repeated
+### Signin p50 (ms) — warm path, same user repeated. Stateful variants now defer KV session-write via `waitUntil`.
 
-| variant                 |   wnam |   enam |    sam |   weur |   eeur |   apac |     oc |     me |    afr |
-| ----------------------- | -----: | -----: | -----: | -----: | -----: | -----: | -----: | -----: | -----: |
-| current (baseline)      |    620 |    615 |    654 |    144 |    258 |   1395 |   1582 |    249 |    167 |
-| thick-identity          |    625 |    565 |    621 |    131 |    269 |   1369 |   1592 |    230 |    123 |
-| fast-hash               |    450 |    446 |    427 |     96 |    196 |   1253 |   1429 |    188 |    108 |
-| pbkdf2-fast             |    461 |    452 |    431 |     75 |    256 |   1247 |   1441 |    196 |     98 |
-| kv-cache                |    620 |    590 |    615 |    172 |    276 |   1351 |   1558 |    233 |    148 |
-| stacked                 |    491 |    448 |    420 |     90 |    180 |   1250 |   1347 |    134 |     83 |
-| recommended             |    468 |    412 |    406 |     67 |    157 |   1227 |   1411 |    166 |     83 |
-| **stateless**           | **15** | **32** | **19** | **14** | **66** | **13** | **39** | **25** | **17** |
-| d1-unique               |    463 |    469 |    422 |    103 |    187 |   1231 |   1454 |    171 |    111 |
-| **d1-unique-stateless** |     22 |     62 |     24 |     25 | **46** |     40 |     85 |     29 |     43 |
+| variant                 |   wnam |   enam | sam | weur | eeur | apac |   oc |  me | afr |
+| ----------------------- | -----: | -----: | --: | ---: | ---: | ---: | ---: | --: | --: |
+| current (baseline)      |     46 |     76 |  96 |   42 |   58 |   86 |  107 | 119 |  51 |
+| thick-identity          |     43 |     46 |  33 |   36 |   21 |   33 |   53 |  46 |  39 |
+| fast-hash               |     47 |     18 |  52 |   52 |   40 |   47 |   63 |  74 |  54 |
+| pbkdf2-fast             |     57 |     77 |  62 |   45 |   51 |   19 |   65 |  21 |  46 |
+| kv-cache                |     60 |     28 |  55 |   58 |  107 |   31 |  109 |  23 |  55 |
+| stacked                 |     32 |     54 |  43 |   27 |   37 |   49 |  124 |  16 |  35 |
+| recommended             | **27** | **14** |  32 |   29 |   26 |   32 |   60 |  31 |  33 |
+| **stateless**           | **15** | **32** |  19 |   14 |   66 |   13 |   39 |  25 |  17 |
+| d1-unique               |    463 |    469 | 422 |  103 |  187 | 1231 | 1454 | 171 | 111 |
+| **d1-unique-stateless** |     22 |     62 |  24 |   25 |   46 |   40 |   85 |  29 |  43 |
+
+### Signout p50 (ms, n=30) — fresh signin then immediate signout
+
+| variant                 |  wnam |  enam |    sam |  weur |  eeur |  apac |    oc |    me |   afr |
+| ----------------------- | ----: | ----: | -----: | ----: | ----: | ----: | ----: | ----: | ----: |
+| current                 |   175 |    74 |    136 |    87 |    84 |   204 |   369 |    86 |   236 |
+| thick-identity          |   205 |    67 |    196 |     0 |   104 |   184 |   444 |    92 |   222 |
+| fast-hash               |   282 |    56 |    186 |    85 |    99 |   162 |   298 |    78 |   174 |
+| pbkdf2-fast             |   205 |    59 |    196 |    85 |   105 |   144 |   348 |   135 |   222 |
+| kv-cache                |   282 |    62 |    153 |    82 |   103 |   185 |   369 |    92 |   235 |
+| stacked                 |   263 |    69 |    145 |    72 |   104 |   205 |   328 |    84 |   222 |
+| recommended             |   167 |    72 |    240 |   112 |   111 |   226 |   376 |   100 |   222 |
+| **stateless**           | **0** | **0** |  **5** | **0** | **0** | **0** | **0** | **0** | **0** |
+| d1-unique               |   262 |    65 |    196 |    93 |   102 |   205 |   363 |    88 |   214 |
+| **d1-unique-stateless** | **0** | **0** | **17** | **0** | **0** | **0** | **0** | **0** | **0** |
+
+Stateful variants spend 60-440 ms on signout despite KV DELETE being deferred via `waitUntil`. Most of that is BA's session-lookup GET (which can't be deferred — needs to confirm the session exists before deleting). The remaining latency is the BA handler itself + cookie unset. Stateless paths skip this entirely because there's no server-side session to look up — the cookie clear is enough.
+
+### Dup-signup p50 (ms, n=30) — EMAIL_ALREADY_EXISTS error path
+
+| variant             | wnam | enam |  sam | weur | eeur | apac |   oc |  me |  afr |
+| ------------------- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --: | ---: |
+| current             | 1004 |   65 |  793 |  125 |   40 |   81 | 1305 | 103 | 1127 |
+| thick-identity      | 1041 |   88 | 1139 |  534 |   77 |   81 | 1201 |  69 | 1127 |
+| fast-hash           | 1041 |   34 |  932 |  534 |  103 |   95 | 1201 |  56 | 1100 |
+| pbkdf2-fast         | 1041 |   34 |   66 |   80 |   77 |   30 | 1201 |  54 |  207 |
+| kv-cache            | 1004 |   68 | 1139 |  534 |  103 |   69 | 1042 |  56 |  697 |
+| stacked             | 1041 |   65 |  753 |  125 |   77 |   86 |  963 |  69 |  697 |
+| recommended         |  936 |   68 |  793 |  456 |   74 |   79 | 1201 |  64 |  697 |
+| stateless           |  936 |   68 |  793 |  534 |  103 |   77 |  963 |  61 | 1127 |
+| d1-unique           |  693 |  656 |  676 |  639 |  728 |  935 |  913 | 701 |  602 |
+| d1-unique-stateless |  758 |  684 |  691 |  587 |  747 |  996 |  944 | 728 |  677 |
+
+The bimodal IdentityDO numbers (cheap in enam/eeur/apac/me, expensive in wnam/sam/oc/afr) come from BA's early `findOne(user, email, join.account=true)` hitting the warm IdentityDO and short-circuiting — except in regions where the bench-run's prepareUser created the IdentityDO in a different colo from where the dup-signups land. D1-unique stays consistent (~600-1000 ms) because its `findOne` skip-path doesn't catch dup-email; the recommended `Promise.race` against the KV `identity_index` pre-check in the roadmap below would flatten this.
+
+### Get-session p50 (ms, n=30)
+
+The probe-worker calls `GET /api/auth/get-session` with **no cookie** — all variants return `{session:null,user:null}` in ≤30 ms p95 globally (often ≤1 ms). For warm authenticated `get-session`, see the lifecycle bench above where the second-iteration signin within the same probe DO benefits from cookieCache (sub-100 ms p50 stateless / d1-unique-stateless).
 
 ### DB vs DO for the typical hot path
 
@@ -300,6 +338,65 @@ End-to-end trace of `POST /api/auth/sign-up/email` for the `d1-unique-stateless`
 
 - **Step 5 — `Promise.allSettled([d1.INSERT, userStub.createPrincipal])`**: independent operations (the principalId is locally generated), run in parallel. Failure of either rolls back the other. Saves ~one D1 cross-region round-trip (100–300 ms) of wall time.
 - **Steps 10, 11, 12** — non-critical writes are dispatched via `ctx.waitUntil` so the client response doesn't wait.
+
+### `waitUntil` audit — every deferred write
+
+The full inventory of writes that don't affect response correctness, per auth path:
+
+| flow                           | write                                           | status                                        | notes                                                                     |
+| ------------------------------ | ----------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------- |
+| sign-up                        | `identityIndexCache.upsert` (KV + optional D1)  | deferred                                      | `ctx.waitUntil` in `do.ts`                                                |
+| sign-up                        | `IdentityDO.thick_cache` fan-out                | deferred (thick mode)                         | `ctx.waitUntil` in `do.ts`                                                |
+| sign-up                        | UserDO outbox → D1 mirror (`users`, `accounts`) | async (alarm)                                 | runs in DO background, ~3–6 s lag                                         |
+| sign-up + sign-in              | `secondaryStorage.set` (session KV PUT)         | **deferred (this PR)**                        | `wrapDeferredKv` in `examples/hono-do/src/auth/index.ts`; reads stay sync |
+| sign-out                       | `secondaryStorage.delete` (session KV DELETE)   | **deferred (this PR)**                        | safe — cookie is cleared client-side regardless                           |
+| forget-password / verification | `secondaryStorage.set` (one-time-token PUT)     | **deferred (this PR)**                        | safe — user clicks email link seconds later                               |
+| sign-up                        | `D1.INSERT identity_unique`                     | critical-path (must complete before response) | runs in parallel with `createPrincipal` via `Promise.allSettled`          |
+| sign-up                        | `UserDO.createPrincipal`                        | critical-path                                 | parallel with D1.INSERT                                                   |
+| sign-up                        | `UserDO.createAccount`                          | critical-path                                 | sequential after createPrincipal                                          |
+| sign-in / get-session          | `secondaryStorage.get` (session KV GET)         | **must stay sync**                            | BA needs the value back for the response                                  |
+| sign-up / sign-in              | password hash (PBKDF2/scrypt)                   | critical-path, CPU-bound                      | output is needed for verify/store; not deferrable                         |
+
+The wrapper is two lines at the BA config call site. Reads still go through to KV synchronously.
+
+**Safe-because:** Cloudflare KV is already eventually consistent across regions, and same-region same-key writes are serialized. Moving `set`/`delete` off the response critical path means at worst a different colo's read sees stale data for ~5–30 ms (KV's normal propagation window) — exactly the window that existed before the deferral.
+
+**Not safe to defer:** the password hash (response carries the verification result), `secondaryStorage.get` (read needed for the response), the D1.INSERT in the d1-unique path (would surface UNIQUE conflicts as silent later-failures and break duplicate-account safety).
+
+### Roadmap — performance items recommended from this PR
+
+Ordered by expected wall-time win × ease of implementation.
+
+1. **KV pre-check on the dup-email path** (`Promise.race` between KV `identity_index.get` and PBKDF2 hash). Wins **~500 ms** on the EMAIL_ALREADY_EXISTS path for d1-unique variants; ~0 ms cost on the happy path if the KV miss is also racing against the hash. Small adapter change in `do.ts` `createUser`.
+2. **UserDO pre-warm pool** (already designed in [UserDO pre-warm pool (planned)](#userdo-pre-warm-pool-planned)). Wins **~50–300 ms** on signup in non-NA regions by claiming a warm DO instead of creating one. Bigger lift — needs a `PoolManagerDO` + cron + claim semantics.
+3. **Pre-fire D1 INSERT during password hash** (Step 4 ‖ Step 5). Wins **~50–150 ms** on signup. Risk: orphan identity rows on rare BA validation rejection between hash start and create. Mitigate with a TTL sweep of unclaimed `identity_unique` rows older than 60 s.
+4. **Multi-jurisdiction Phase 2** with the safe pattern (global `identity_unique` D1 + per-jurisdiction PII shards). Cost ~50–250 ms cross-region for EU signups; unlocks GDPR-grade residency.
+5. **Bulk adapter join** for BA `findOne(user, email, join.account)`. Single SQL/DO call instead of the current `lookup` + `findPrincipal` + `listAccounts` chain. Wins **~50–100 ms** on signin warm path.
+6. **In-isolate L1 cache for KV session reads** (~30 s TTL, per-isolate `Map`). Wins **~5–15 ms** per `get-session` for same-isolate repeat reads. No correctness risk since we clear on sign-out.
+7. **Per-account rate limit + captcha after N failures** (security, not perf). Already wired at the IP layer via BA core; account-level rate limit is the natural next step before captcha.
+
+### Duplicate-account safety — every eventual-consistency path audited
+
+Two principals owning the same email is the single failure mode that justifies the whole identity-uniqueness layer. Walking each path that touches that invariant:
+
+| scenario                                                                         | path                                                                                           | strongly consistent?                                                                                                                                          | duplicate possible?                                                                                                         |
+| -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Two concurrent signups, same email, different colos                              | D1 `INSERT identity_unique` (UNIQUE constraint)                                                | yes — D1 serializes through the single primary                                                                                                                | no                                                                                                                          |
+| Two concurrent signups, same email, different colos (DO variant)                 | `IdentityDO.reserve` then `commit`                                                             | yes — one DO per email-hash, `blockConcurrencyWhile` serializes                                                                                               | no                                                                                                                          |
+| Two concurrent signups, same email, same colo same isolate                       | both above                                                                                     | yes — same serializer, just lower-latency                                                                                                                     | no                                                                                                                          |
+| Concurrent signin while a signup is mid-`Promise.allSettled`                     | INSERT lands, principal create lands a few ms later                                            | window of partial state (~5–20 ms) where D1 says "exists" but UserDO returns null                                                                             | no duplicate — signin returns 401, retry succeeds. Mitigated further by `rollback-on-failure` paths in `do.ts` `createUser` |
+| Signup region A → signin region B before KV `identity_index` propagates          | KV cache may briefly return "not present"                                                      | safe by design — `identity_index` is a _cache_. Miss falls through to `identity_unique` (D1, primary-consistent) or `IdentityDO.lookup` (DO, single-instance) | no                                                                                                                          |
+| KV `identity_index` returns stale `{principalId, version}` for a deleted account | reader receives the stale principalId, then tries UserDO                                       | UserDO returns 404 (principal disabled) → signin fails closed; cache is version-stamped so it'll repopulate on the next miss                                  | no — fails closed                                                                                                           |
+| Multi-jurisdiction (Phase 2): EU and NA simultaneously signup `alice@x.com`      | KV `identity_directory` returns "not present" in both regions before either's write propagates | **possible duplicate** if each jurisdiction has its OWN `identity_unique` D1 with no global coordination                                                      | **yes** — see mitigation below                                                                                              |
+| `restorePrincipal` runs concurrently with a live signup for the same email       | `UserDO.blockConcurrencyWhile` serializes at the DO; D1 INSERT is independent                  | restore reads from D1 mirror and rewrites UserDO state. If a parallel signup INSERTs a new principalId for the same email, restore reads the OLD principalId  | no duplicate, but old data may be temporarily restored — administrative path, docs say "freeze writes during restore"       |
+| Outbox flush to D1 mirror lags                                                   | UserDO source-of-truth is unchanged; D1 mirror lags ~3–6 s                                     | auth flows never read the mirror; admin dashboards may see stale data                                                                                         | no                                                                                                                          |
+
+**Multi-jurisdiction mitigation (Phase 2 decision):** the only path that allows duplicates is two jurisdictions racing for the same email. Two options:
+
+1. Per-jurisdiction `identity_unique` + global KV `identity_directory` as coordination layer. KV doesn't have CAS, so two regions can both insert into their own D1 and then both write to KV; one KV write wins and overwrites the other. Result: two principals exist, KV index points to only one. **Bad.**
+2. Global `identity_unique` D1 (one for the world) + per-jurisdiction `users`+`accounts` D1s. All signups race for the same UNIQUE constraint at one primary. Loser gets EMAIL_ALREADY_EXISTS. Then per-jurisdiction routing decides which regional D1 to write the heavy `users`/`accounts` to. **This is the safe pattern** — strong consistency at the email-uniqueness layer, weak consistency tolerated only for PII placement.
+
+Decision: when Phase 2 ships, use **option 2** — single global `identity_unique` D1 (primary in `enam`, replicas everywhere) shared by all jurisdictions. INSERTs from EU pay 50–250 ms cross-region; this is well under the existing ~600 ms signup floor and the safety guarantee is worth it.
 
 ### What still isn't parallel (worth measuring next)
 

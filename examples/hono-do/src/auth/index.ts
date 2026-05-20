@@ -156,12 +156,11 @@ function createAuth(
     // Falls back to the DO adapter from `wrapped` when any of the
     // bindings is missing (so the variant can be deployed in stages).
     const crdbAdapter =
-        env?.USE_CRDB_MULTI === "1" && env.HYPERDRIVE_ENAM && env.HYPERDRIVE_WEUR && env.HYPERDRIVE_APAC
+        env?.USE_CRDB_MULTI === "1" && env.HYPERDRIVE_ENAM && env.HYPERDRIVE_WEUR
             ? createCrdbAdapter({
                   hyperdrives: {
                       enam: env.HYPERDRIVE_ENAM,
                       weur: env.HYPERDRIVE_WEUR,
-                      apac: env.HYPERDRIVE_APAC,
                   },
                   cf,
                   identityIndexCache:

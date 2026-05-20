@@ -462,17 +462,18 @@ Honest accounting of what each bench measures and where state could leak between
 
 **Cold-bench protocol** for follow-up: deploy a never-seen worker name; or wait ≥30 s for DO isolate eviction; then run `n=1`.
 
-### CockroachDB + Hyperdrive (3-region) — new variant
+### CockroachDB + Hyperdrive (2-region) — new variant
 
-`examples/hono-do/src/crdb/` ships a minimal-schema CRDB adapter that routes user + account writes to one of three CRDB Cloud clusters by `cf.continent`:
+`examples/hono-do/src/crdb/` ships a minimal-schema CRDB adapter that routes user + account writes to one of two CRDB Cloud clusters by `cf.continent`:
 
-| CF region | AWS region       | Hyperdrive binding |
-| --------- | ---------------- | ------------------ |
-| `enam`    | `us-east-2`      | `HYPERDRIVE_ENAM`  |
-| `weur`    | `eu-central-1`   | `HYPERDRIVE_WEUR`  |
-| `apac`    | `ap-southeast-1` | `HYPERDRIVE_APAC`  |
+| CF region | AWS region     | Hyperdrive binding | routed traffic          |
+| --------- | -------------- | ------------------ | ----------------------- |
+| `enam`    | `us-east-2`    | `HYPERDRIVE_ENAM`  | NA, SA, AS, OC, default |
+| `weur`    | `eu-central-1` | `HYPERDRIVE_WEUR`  | EU, AF                  |
 
-Schema is minimal — `users` + `accounts` only (no `sessions`/`verifications`; the variant runs stateless). Stripped from glass's auth schema with the Stripe/Zendesk/legacy-ID columns removed. See `examples/hono-do/src/crdb/README.md` for the operator setup: create three CRDB Cloud clusters, apply `0000_init.sql`, `wrangler hyperdrive create` × 3, paste ids into the `[env.crdb_multi]` block, `wrangler deploy --env crdb_multi`.
+Two regions for now (data-residency boundary). APAC and AF traffic falls through to the closer cluster — adding a third region (e.g., `ap-southeast-1`) is a config-only change: one cluster + one Hyperdrive + one `if` in `pickRegion()`.
+
+Schema is minimal — `users` + `accounts` only (no `sessions`/`verifications`; the variant runs stateless). Stripped from glass's auth schema with the Stripe/Zendesk/legacy-ID columns removed. See `examples/hono-do/src/crdb/README.md` for the operator setup: create two CRDB Cloud clusters, apply `0000_init.sql`, `wrangler hyperdrive create` × 2, paste ids into the `[env.crdb_multi]` block, `wrangler deploy --env crdb_multi`.
 
 Drizzle ORM v1 (`drizzle-orm@rc`, `cockroach` driver) is used; same `Promise.race` KV pre-check + identity-index write-through patterns as the D1-unique path. Bench via the existing probe-worker: `variantId: "crdb-multi"`.
 

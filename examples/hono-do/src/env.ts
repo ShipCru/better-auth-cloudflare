@@ -16,18 +16,16 @@ export interface CloudflareBindings {
     GOOGLE_CLIENT_SECRET?: string;
     /**
      * "1" routes user + account writes through the crdb-multi-region
-     * adapter (one Hyperdrive per region). Requires HYPERDRIVE_ENAM,
-     * HYPERDRIVE_WEUR, HYPERDRIVE_APAC bindings + matching CRDB Cloud
-     * clusters in us-east-2 / eu-central-1 / ap-southeast-1. Region
-     * names match the CF region codes used by the probe-worker.
+     * adapter (one Hyperdrive per region). Requires HYPERDRIVE_ENAM
+     * and HYPERDRIVE_WEUR bindings + matching CRDB Cloud clusters in
+     * us-east-2 and eu-central-1. APAC traffic falls through to ENAM.
+     * Region names match the CF region codes used by the probe-worker.
      */
     USE_CRDB_MULTI?: string;
     /** Hyperdrive binding for the ENAM (us-east-2) CRDB cluster. */
     HYPERDRIVE_ENAM?: Hyperdrive;
     /** Hyperdrive binding for the WEUR (eu-central-1) CRDB cluster. */
     HYPERDRIVE_WEUR?: Hyperdrive;
-    /** Hyperdrive binding for the APAC (ap-southeast-1) CRDB cluster. */
-    HYPERDRIVE_APAC?: Hyperdrive;
     /** "1" enables the thick IdentityDO sign-in fast path. Set per wrangler env. */
     USE_THICK_IDENTITY?: string;
     /** "1" swaps BA's scrypt default for the faster preset. See auth/fast-hash.ts. */

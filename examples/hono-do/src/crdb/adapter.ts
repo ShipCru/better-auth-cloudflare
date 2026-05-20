@@ -40,15 +40,18 @@ import { users, accounts } from "./schema";
  * the right Hyperdrive. Aligns with the lib's `examples/probe-worker`
  * region scheme.
  *
- *   enam  → AWS us-east-2 (cf.continent === "NA")
- *   weur  → AWS eu-central-1 (cf.continent === "EU")
- *   apac  → AWS ap-southeast-1 (cf.continent === "AS" or "OC")
+ *   enam  → AWS us-east-2 (cf.continent === "NA", "SA", "OC", default)
+ *   weur  → AWS eu-central-1 (cf.continent === "EU", "AF")
+ *
+ * APAC traffic falls through to `enam` for now. Adding a third region
+ * (e.g., AWS ap-southeast-1) is a config-only change: extend `hyperdrives`,
+ * add another `if` in `pickRegion()`, and provision the cluster + Hyperdrive.
  */
-export type CrdbRegion = "enam" | "weur" | "apac";
+export type CrdbRegion = "enam" | "weur";
 
 export interface CrdbAdapterConfig {
     /** One Hyperdrive binding per region. Region keys match CF region codes. */
-    hyperdrives: { enam: Hyperdrive; weur: Hyperdrive; apac: Hyperdrive };
+    hyperdrives: { enam: Hyperdrive; weur: Hyperdrive };
     /** Cloudflare `cf` block from the request — used to pick the region. */
     cf?: { continent?: string | null };
     /** Optional KV identity_index for the dup-email pre-check. */
@@ -84,8 +87,13 @@ export interface Adapter {
 }
 
 function pickRegion(continent: string | null | undefined): CrdbRegion {
-    if (continent === "EU") return "weur";
-    if (continent === "AS" || continent === "OC") return "apac";
+    // EU + AF route to the eu-central-1 cluster (data-residency boundary).
+    // Everything else — NA, SA, AS, OC, AN, unknown — goes to us-east-2.
+    // AS/OC fallback exists because a Singapore CRDB cluster is queued as
+    // the next region but not provisioned yet; routing them through enam
+    // is one trans-Pacific hop, ~150-250 ms vs the ~80 ms a local APAC
+    // cluster would give us.
+    if (continent === "EU" || continent === "AF") return "weur";
     return "enam";
 }
 

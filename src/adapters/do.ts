@@ -377,12 +377,43 @@ export function createDoAdapter(config: DOAdapterConfig): DoAdapterFactory {
                                 // true, so the includeAccounts branch is what
                                 // matters. We still need to go to the DO for that.
                                 if (!includeAccounts) {
-                                    // Pre-fire of IdentityDO.reserve was removed: when
-                                    // BA's default scrypt hash takes 5–10s, the in-flight
-                                    // DO RPC sits idle long enough for CF to drop it
-                                    // ("Network connection lost"). The fast-hash variants
-                                    // mask the bug; default/thick/kv-cache surface it.
-                                    // The d1-unique path delivers the bigger win anyway.
+                                    // KV pre-check on the dup-email path. When we have
+                                    // an identityIndexCache (KV), a cache hit means the
+                                    // email is *already taken* — return a stub user so
+                                    // BA short-circuits to EMAIL_ALREADY_EXISTS BEFORE
+                                    // hashing the password. Saves the full hash + INSERT
+                                    // round-trip (~500 ms on d1-unique dup-signup).
+                                    //
+                                    // KV is eventually consistent across regions
+                                    // (~5-30 ms within a region, propagation up to a
+                                    // minute). A miss DOESN'T mean the email is unused —
+                                    // the D1.INSERT in createUser is still the
+                                    // authoritative uniqueness check. So a cache miss
+                                    // continues to the legacy skip-path (return null).
+                                    //
+                                    // Race against a 50 ms ceiling so the unique-email
+                                    // happy path never pays more than that for the KV
+                                    // GET. KV warm reads are ~5-30 ms; the ceiling only
+                                    // matters when KV is degraded.
+                                    if (config.identityIndexCache) {
+                                        const emailHash = await hashEmail(email);
+                                        const ceiling = new Promise<null>(r => setTimeout(() => r(null), 50));
+                                        const hit = await Promise.race([
+                                            config.identityIndexCache.get(emailHash).catch(() => null),
+                                            ceiling,
+                                        ]);
+                                        if (hit) {
+                                            log.info("findOne.email.kv_precheck_hit", {
+                                                principalIdShort: await shortHash(hit.principalId),
+                                                version: hit.version,
+                                            });
+                                            // Stub return — BA only needs to see that the
+                                            // email is taken. id + email is enough for BA
+                                            // to surface EMAIL_ALREADY_EXISTS without
+                                            // hashing or reading the account record.
+                                            return { id: hit.principalId, email } as never;
+                                        }
+                                    }
                                     log.info("findOne.email.skipped_idDO", {});
                                     return null;
                                 }
@@ -797,6 +828,21 @@ async function createUser(
             // so the email can be released; surface the DO error.
             await config.d1IdentityStore.disable(emailHash).catch(() => {});
             throw principalSettled.reason;
+        }
+        // Write-through to the identity_index KV cache so the next signin
+        // skips both the D1 read AND the DO RPC, and so dup-email signups
+        // hit the KV pre-check (do.ts findOne skip-path) and fail fast at
+        // 5-30 ms instead of hashing first. Deferred via waitUntil when
+        // available — this benefits FUTURE requests, not the current one.
+        if (config.identityIndexCache) {
+            const cachePromise = config.identityIndexCache
+                .upsert(emailHash, { principalId, version: 1 })
+                .catch(err => log.warn("identity-cache.upsert failed (d1 path)", { err: (err as Error)?.message }));
+            if (config.deferredWritesCtx) {
+                config.deferredWritesCtx.waitUntil(cachePromise);
+            } else {
+                await cachePromise;
+            }
         }
         return mapPrincipalToBA(principalSettled.value);
     }

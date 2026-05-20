@@ -33,15 +33,41 @@ postgresql://USER:PASS@host.eu-central-1.cockroachlabs.cloud:26257/defaultdb?ssl
 
 Both URLs point at the same cluster; the difference is which SQL gateway the connection lands on. Each gateway is local to its region's nodes, so writes coming through it use that region as their default `crdb_region`.
 
-### 2. Apply schema (once, against either URL)
+### 2. Apply schema via Drizzle (any URL — same cluster)
 
-Both URLs hit the same cluster — pick either and run:
+Drizzle Kit is wired in as a first-class dep. The migrator reads pending migrations from `src/crdb/migrations/` and applies them via a tracked `__drizzle_migrations` table. Re-runs are idempotent.
 
 ```bash
-psql "$ENAM_URL" -f src/crdb/migrations/0000_init.sql
+# Once per shell (sources the URLs from your glass env)
+set -a; source /Users/stevezimmerman/git/glass/packages/rock/.env.development-ref; set +a
+
+# Apply 0000_init (creates tables + REGIONAL BY ROW + composite FKs)
+pnpm db:migrate
+```
+
+Verify:
+
+```bash
+pnpm db:studio    # opens a web UI at https://local.drizzle.studio
+# Or: psql / CRDB Cloud SQL Shell:
+#   SHOW REGIONS FROM DATABASE defaultdb;
+#   SHOW LOCALITY FROM TABLE users;       -- REGIONAL BY ROW
+#   SHOW LOCALITY FROM TABLE accounts;    -- REGIONAL BY ROW
 ```
 
 The migration creates `users` + `accounts` and sets `LOCALITY REGIONAL BY ROW` on both, including the composite `(user_id, crdb_region)` FK that keeps account joins region-local.
+
+### Drizzle workflow going forward
+
+| command            | what it does                                                                            |
+| ------------------ | --------------------------------------------------------------------------------------- |
+| `pnpm db:generate` | diff `src/crdb/schema.ts` against the last snapshot, write a new migration file         |
+| `pnpm db:migrate`  | run pending migrations against `$DATABASE_URL` (or `$BA_CF_DATABASE_URL_AWS_US_EAST_2`) |
+| `pnpm db:push`     | dev-only — push schema directly without writing a migration                             |
+| `pnpm db:studio`   | local web UI for browsing the DB                                                        |
+| `pnpm db:check`    | validate that migrations are consistent with the schema                                 |
+
+Custom CRDB DDL (REGIONAL BY ROW, composite region FKs) lives at the END of `migrations/0000_init.sql` — handwritten. Drizzle-kit's diff engine doesn't model `LOCALITY` or region-aware FKs, so any new locality tweaks need to be appended to the generated migration by hand.
 
 ### 3. Create two Hyperdrive configs (one per regional gateway)
 

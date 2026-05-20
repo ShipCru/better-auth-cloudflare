@@ -46,7 +46,11 @@ import {
  *
  * Values must match the regions configured on the live cluster.
  */
-export const crdbInternalRegion = cockroachEnum("crdb_internal_region", ["us-east-2", "eu-central-1"]);
+export const crdbInternalRegion = cockroachEnum("crdb_internal_region", [
+    "aws-us-east-2",
+    "aws-eu-central-1",
+    "aws-ap-southeast-1",
+]);
 
 /**
  * `default_to_database_primary_region(gateway_region())` — the

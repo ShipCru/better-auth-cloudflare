@@ -23,10 +23,12 @@ export interface CloudflareBindings {
      * in the region of the SQL gateway hit (CRDB `gateway_region()`).
      */
     USE_CRDB_MULTI?: string;
-    /** Hyperdrive → us-east-2 SQL gateway of the multi-region CRDB cluster. */
-    HYPERDRIVE_ENAM?: Hyperdrive;
-    /** Hyperdrive → eu-central-1 SQL gateway of the same multi-region CRDB cluster. */
-    HYPERDRIVE_WEUR?: Hyperdrive;
+    /** Hyperdrive → aws-us-east-2 SQL gateway of the multi-region CRDB cluster. */
+    HYPERDRIVE_AWS_US_EAST_2?: Hyperdrive;
+    /** Hyperdrive → aws-eu-central-1 SQL gateway of the same cluster. */
+    HYPERDRIVE_AWS_EU_CENTRAL_1?: Hyperdrive;
+    /** Hyperdrive → aws-ap-southeast-1 SQL gateway of the same cluster. */
+    HYPERDRIVE_AWS_AP_SOUTHEAST_1?: Hyperdrive;
     /** "1" enables the thick IdentityDO sign-in fast path. Set per wrangler env. */
     USE_THICK_IDENTITY?: string;
     /** "1" swaps BA's scrypt default for the faster preset. See auth/fast-hash.ts. */

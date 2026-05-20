@@ -40,10 +40,11 @@ import { users, accounts } from "./schema";
  * the CRDB cluster (`ALTER DATABASE ... ADD REGION ...`) to extend.
  */
 /**
- * Cluster region codes — match CRDB Cloud's region naming, used both
- * to pick the Hyperdrive AND as the `crdb_region` column value.
+ * Cluster region codes — match CRDB Cloud's naming, including the
+ * `aws-` prefix the cluster uses on AWS (CRDB on GCP would use `gcp-`).
+ * These are the values stored in the `crdb_region` column.
  */
-export type CrdbRegion = "us-east-2" | "eu-central-1";
+export type CrdbRegion = "aws-us-east-2" | "aws-eu-central-1" | "aws-ap-southeast-1";
 
 export interface CrdbAdapterConfig {
     /**
@@ -54,7 +55,11 @@ export interface CrdbAdapterConfig {
      * `gateway_region()` default places it locally, and reads/writes
      * stay in-region.
      */
-    hyperdrives: { "us-east-2": Hyperdrive; "eu-central-1": Hyperdrive };
+    hyperdrives: {
+        "aws-us-east-2": Hyperdrive;
+        "aws-eu-central-1": Hyperdrive;
+        "aws-ap-southeast-1": Hyperdrive;
+    };
     /** Cloudflare `cf` block — used to pick the Hyperdrive. */
     cf?: { continent?: string | null };
     /** Optional KV identity_index for the dup-email pre-check. */
@@ -98,8 +103,9 @@ export interface Adapter {
  * us-east-2 — the primary region.
  */
 function pickRegion(continent: string | null | undefined): CrdbRegion {
-    if (continent === "EU" || continent === "AF") return "eu-central-1";
-    return "us-east-2";
+    if (continent === "EU" || continent === "AF") return "aws-eu-central-1";
+    if (continent === "AS" || continent === "OC") return "aws-ap-southeast-1";
+    return "aws-us-east-2";
 }
 
 async function hashEmail(email: string): Promise<string> {

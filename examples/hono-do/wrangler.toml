@@ -538,17 +538,23 @@ id = "YOUR_KV_NAMESPACE_ID"
 binding = "AUTH_ANALYTICS"
 dataset = "ba_cf_do_events"
 
-# Two Hyperdrives pointing at the SAME multi-region CRDB Cloud cluster
-# but at different regional SQL gateway hostnames. Hyperdrive is itself
-# regional (it caches connections at every CF edge), so using one
-# Hyperdrive per gateway lets each region's worker requests land on
-# the closest gateway. The row's `gateway_region()` default then
-# places it in that region (REGIONAL BY ROW). Both bindings → same
-# cluster, same data. Different ingress paths.
+# Three Hyperdrives pointing at the SAME multi-region CRDB Cloud cluster
+# but at different regional SQL gateway hostnames (aws-us-east-2,
+# aws-eu-central-1, aws-ap-southeast-1). Hyperdrive is itself regional
+# (caches connections at every CF edge), so using one Hyperdrive per
+# gateway lets each region's worker requests land on the closest gateway.
+# The row's `gateway_region()` default then places it in that region
+# (REGIONAL BY ROW). All three bindings → same cluster, same data.
+# Binding names match the AWS region exactly so adding a fourth region
+# later is a copy-paste, not a rename.
 [[env.crdb_multi.hyperdrive]]
-binding = "HYPERDRIVE_ENAM"
-id = "YOUR_HYPERDRIVE_ENAM_ID"
+binding = "HYPERDRIVE_AWS_US_EAST_2"
+id = "YOUR_HYPERDRIVE_AWS_US_EAST_2_ID"
 
 [[env.crdb_multi.hyperdrive]]
-binding = "HYPERDRIVE_WEUR"
-id = "YOUR_HYPERDRIVE_WEUR_ID"
+binding = "HYPERDRIVE_AWS_EU_CENTRAL_1"
+id = "YOUR_HYPERDRIVE_AWS_EU_CENTRAL_1_ID"
+
+[[env.crdb_multi.hyperdrive]]
+binding = "HYPERDRIVE_AWS_AP_SOUTHEAST_1"
+id = "YOUR_HYPERDRIVE_AWS_AP_SOUTHEAST_1_ID"

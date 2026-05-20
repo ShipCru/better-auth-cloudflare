@@ -1,18 +1,24 @@
--- Minimal CockroachDB auth schema for the bench, ONE multi-region cluster.
--- Run ONCE against the single cluster before the first deploy.
+-- Minimal CockroachDB auth schema for the bench. ONE multi-region cluster
+-- with three regions (us-east-2, eu-central-1, ap-southeast-1).
 --
---   psql "$DATABASE_URL" -f 0000_init.sql
+-- Apply via `pnpm db:migrate` from examples/hono-do.
 --
--- Prereq: the cluster must already be configured as multi-region with
--- both us-east-2 and eu-central-1 as available regions. Do this from
--- the CockroachDB Cloud dashboard (Cluster Settings → Regions) or via:
---
---   ALTER DATABASE defaultdb SET PRIMARY REGION 'us-east-2';
---   ALTER DATABASE defaultdb ADD REGION 'eu-central-1';
---
--- After regions are configured the migration below is safe to run.
+-- The cluster itself must exist + have the three regions provisioned at
+-- the cluster level (CockroachDB Cloud → Cluster Settings → Regions).
+-- THIS migration handles the database-level region setup + the schema.
 
--- ───── 1. Tables (plain Postgres-flavoured DDL) ────────────────────
+-- ───── 1. Database-level region setup ──────────────────────────────
+-- These ALTERs add each region to the `defaultdb` database and create
+-- the system-managed `crdb_internal_region` enum. Each statement is
+-- guarded by IF NOT EXISTS so re-runs are safe. The first ADD REGION
+-- on a fresh database also sets it as primary; subsequent regions are
+-- secondary unless promoted.
+
+ALTER DATABASE defaultdb PRIMARY REGION "aws-us-east-2";
+ALTER DATABASE defaultdb ADD REGION IF NOT EXISTS "aws-eu-central-1";
+ALTER DATABASE defaultdb ADD REGION IF NOT EXISTS "aws-ap-southeast-1";
+
+-- ───── 2. Tables (plain Postgres-flavoured DDL) ────────────────────
 
 CREATE TABLE IF NOT EXISTS users (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),

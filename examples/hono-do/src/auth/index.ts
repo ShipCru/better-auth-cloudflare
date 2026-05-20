@@ -156,11 +156,15 @@ function createAuth(
     // Falls back to the DO adapter from `wrapped` when any of the
     // bindings is missing (so the variant can be deployed in stages).
     const crdbAdapter =
-        env?.USE_CRDB_MULTI === "1" && env.HYPERDRIVE_ENAM && env.HYPERDRIVE_WEUR
+        env?.USE_CRDB_MULTI === "1" &&
+        env.HYPERDRIVE_AWS_US_EAST_2 &&
+        env.HYPERDRIVE_AWS_EU_CENTRAL_1 &&
+        env.HYPERDRIVE_AWS_AP_SOUTHEAST_1
             ? createCrdbAdapter({
                   hyperdrives: {
-                      "us-east-2": env.HYPERDRIVE_ENAM,
-                      "eu-central-1": env.HYPERDRIVE_WEUR,
+                      "aws-us-east-2": env.HYPERDRIVE_AWS_US_EAST_2,
+                      "aws-eu-central-1": env.HYPERDRIVE_AWS_EU_CENTRAL_1,
+                      "aws-ap-southeast-1": env.HYPERDRIVE_AWS_AP_SOUTHEAST_1,
                   },
                   cf,
                   identityIndexCache:

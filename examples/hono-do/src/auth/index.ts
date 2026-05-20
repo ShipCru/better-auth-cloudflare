@@ -9,6 +9,7 @@ import {
 import { anonymous } from "better-auth/plugins";
 import type { CloudflareBindings } from "../env";
 import { pickPasswordConfig } from "./password-config";
+import { createCrdbAdapter } from "../crdb/adapter";
 
 /**
  * Single auth factory wired to the Durable Object adapter.
@@ -149,6 +150,26 @@ function createAuth(
     const stateless = env?.USE_STATELESS_SESSION === "1";
     const expiresIn = 21 * 24 * 60 * 60; // 21 days
 
+    // CRDB multi-region path: when USE_CRDB_MULTI=1 AND all three
+    // Hyperdrive bindings are present, route user + account writes to
+    // CockroachDB via the per-region Hyperdrive matching `cf.continent`.
+    // Falls back to the DO adapter from `wrapped` when any of the
+    // bindings is missing (so the variant can be deployed in stages).
+    const crdbAdapter =
+        env?.USE_CRDB_MULTI === "1" && env.HYPERDRIVE_ENAM && env.HYPERDRIVE_WEUR && env.HYPERDRIVE_APAC
+            ? createCrdbAdapter({
+                  hyperdrives: {
+                      enam: env.HYPERDRIVE_ENAM,
+                      weur: env.HYPERDRIVE_WEUR,
+                      apac: env.HYPERDRIVE_APAC,
+                  },
+                  cf,
+                  identityIndexCache:
+                      env.USE_KV_CACHE === "1" && env.KV ? createIdentityIndexCache({ kv: env.KV }) : undefined,
+                  deferredWritesCtx,
+              })
+            : undefined;
+
     return betterAuth({
         baseURL,
         // Trust the local Hono port and the Next.js frontend that proxies
@@ -161,6 +182,11 @@ function createAuth(
             "https://better-auth-cloudflare-opennextjs-do.steve-4b7.workers.dev",
         ],
         ...wrapped,
+        // CRDB adapter overrides BA's `database` field when present. BA
+        // accepts an Adapter object directly; we cast because BA's
+        // public Adapter type is loosely typed (`any`-ish) and our
+        // typed adapter shape isn't reachable from the BA types.
+        ...(crdbAdapter ? { database: crdbAdapter as never } : {}),
         // In stateless mode replace BA's secondaryStorage with a no-op.
         // Without it, BA falls back to the database adapter for sessions
         // and our DO adapter throws on `create({model: 'session'})`. The

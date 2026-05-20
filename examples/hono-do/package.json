@@ -12,9 +12,12 @@
     "dependencies": {
         "@cloudflare/workers-types": "^4.20260507.1",
         "@noble/hashes": "^1.8.0",
+        "@types/pg": "^8.20.0",
         "better-auth": "^1.6.11",
         "better-auth-cloudflare": "workspace:*",
-        "hono": "^4.12.19"
+        "drizzle-orm": "1.0.0-rc.3",
+        "hono": "^4.12.19",
+        "pg": "^8.21.0"
     },
     "devDependencies": {
         "typescript": "^5.7.0",

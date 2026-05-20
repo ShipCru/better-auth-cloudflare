@@ -480,3 +480,77 @@ dataset = "ba_cf_do_events"
 binding = "AUTH_DB"
 database_name = "ba-cf-do-recovery-apac"
 database_id = "00000000-0000-0000-0000-000000000000"
+
+# CockroachDB + Hyperdrive (3 regions). Same source code as the other
+# variants but the BA adapter is replaced with the crdb-multi-region
+# adapter, which picks one of three Hyperdrive bindings by cf.continent:
+#
+#   NA → HYPERDRIVE_ENAM      (us-east-2 CRDB Cloud cluster)
+#   EU → HYPERDRIVE_WEUR      (eu-central-1)
+#   APAC → HYPERDRIVE_APAC  (ap-southeast-1)
+#
+# Setup checklist before deploying:
+#   1. CRDB Cloud: create three Serverless clusters in
+#      us-east-2 / eu-central-1 / ap-southeast-1. Single-region each.
+#      Note the connection strings.
+#   2. Apply schema: `psql "$URL" -f src/crdb/migrations/0000_init.sql`
+#      for each cluster.
+#   3. Cloudflare: `wrangler hyperdrive create ba-crdb-na
+#        --connection-string="postgresql://...us-east-2..."`
+#      (repeat for eu and apac).
+#   4. Paste the three Hyperdrive ids below.
+#   5. wrangler secret put BETTER_AUTH_SECRET --env crdb_multi
+#   6. wrangler secret put BETTER_AUTH_PEPPER --env crdb_multi
+#   7. wrangler deploy --env crdb_multi
+#
+# Bench via the existing probe-worker once a service binding is added
+# (see examples/probe-worker/wrangler.toml).
+[env.crdb_multi]
+name = "ba-cf-do-crdb-multi"
+
+[env.crdb_multi.observability]
+enabled = true
+
+[env.crdb_multi.vars]
+USE_PBKDF2 = "1"
+USE_CRDB_MULTI = "1"
+USE_BUNDLE_RPC = "1"
+USE_STATELESS_SESSION = "1"
+USE_KV_CACHE = "1"
+
+# DO bindings: anonymous signin still uses UserDO (it's the cheapest
+# anonymous-user path). Email/password signups go to CRDB instead.
+[[env.crdb_multi.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.crdb_multi.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.crdb_multi.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.crdb_multi.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.crdb_multi.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+# Hyperdrive bindings — one per region. The CRDB Cloud cluster behind
+# each must live in the matching AWS region. Apply the schema before
+# the first deploy. Paste the real ids after `wrangler hyperdrive create`.
+[[env.crdb_multi.hyperdrive]]
+binding = "HYPERDRIVE_ENAM"
+id = "YOUR_HYPERDRIVE_ENAM_ID"
+
+[[env.crdb_multi.hyperdrive]]
+binding = "HYPERDRIVE_WEUR"
+id = "YOUR_HYPERDRIVE_WEUR_ID"
+
+[[env.crdb_multi.hyperdrive]]
+binding = "HYPERDRIVE_APAC"
+id = "YOUR_HYPERDRIVE_APAC_ID"

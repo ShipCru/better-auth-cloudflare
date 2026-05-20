@@ -443,6 +443,39 @@ The wrapper is two lines at the BA config call site. Reads still go through to K
 
 **Not safe to defer:** the password hash (response carries the verification result), `secondaryStorage.get` (read needed for the response), the D1.INSERT in the d1-unique path (would surface UNIQUE conflicts as silent later-failures and break duplicate-account safety).
 
+### Bench-isolation audit — does prior data help subsequent runs?
+
+Honest accounting of what each bench measures and where state could leak between runs.
+
+| state                                                | persists between runs?                             | impact on numbers                                                                                                                                           |
+| ---------------------------------------------------- | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ProbeDurableObject` SQLite (`probe_runs` history)   | yes — metadata only                                | none on timing                                                                                                                                              |
+| `signinCreds` / `dupCreds` / `signoutCreds`          | no — local var per `runProbe()` call               | none                                                                                                                                                        |
+| User rows in the auth backend's storage              | yes — written on signup, never deleted             | only same-email reads are affected; bench iterations use **fresh emails per iter** except where the workload demands sameness (signin, dup-signup, signout) |
+| KV `identity_index` entries from previous bench runs | yes (with KV TTL eviction)                         | a fresh email is a fresh KV key → miss → no benefit; same-email tests intentionally benefit                                                                 |
+| `IdentityDO` / `UserDO` host process warmth          | yes (CF keeps DOs warm for minutes after activity) | first iteration is cold; iterations 2–30 are warm. n=30 p50 measures the warm steady-state. p95 captures the cold-start outlier.                            |
+| Worker isolate warmth (incl. L1 cache)               | yes — CF Fluid Compute reuses isolates for minutes | benefits same-isolate repeat reads. For benches that hit different isolates per call, no benefit.                                                           |
+
+**Honestly cold:** `signup` p50 (fresh email per iter); `signout` p50 (fresh signin precedes it).
+
+**Warm by design:** `signin` (same user n=30; realistic for "returning user" not "first-ever signin"); `dup-signup` (the optimization _is_ the warm KV cache).
+
+**Cold-bench protocol** for follow-up: deploy a never-seen worker name; or wait ≥30 s for DO isolate eviction; then run `n=1`.
+
+### CockroachDB + Hyperdrive (3-region) — new variant
+
+`examples/hono-do/src/crdb/` ships a minimal-schema CRDB adapter that routes user + account writes to one of three CRDB Cloud clusters by `cf.continent`:
+
+| CF region | AWS region       | Hyperdrive binding |
+| --------- | ---------------- | ------------------ |
+| `enam`    | `us-east-2`      | `HYPERDRIVE_ENAM`  |
+| `weur`    | `eu-central-1`   | `HYPERDRIVE_WEUR`  |
+| `apac`    | `ap-southeast-1` | `HYPERDRIVE_APAC`  |
+
+Schema is minimal — `users` + `accounts` only (no `sessions`/`verifications`; the variant runs stateless). Stripped from glass's auth schema with the Stripe/Zendesk/legacy-ID columns removed. See `examples/hono-do/src/crdb/README.md` for the operator setup: create three CRDB Cloud clusters, apply `0000_init.sql`, `wrangler hyperdrive create` × 3, paste ids into the `[env.crdb_multi]` block, `wrangler deploy --env crdb_multi`.
+
+Drizzle ORM v1 (`drizzle-orm@rc`, `cockroach` driver) is used; same `Promise.race` KV pre-check + identity-index write-through patterns as the D1-unique path. Bench via the existing probe-worker: `variantId: "crdb-multi"`.
+
 ### Roadmap — performance items recommended from this PR
 
 Ordered by expected wall-time win × ease of implementation.
@@ -454,6 +487,15 @@ Ordered by expected wall-time win × ease of implementation.
 5. **Bulk adapter join** for BA `findOne(user, email, join.account)`. Single SQL/DO call instead of the current `lookup` + `findPrincipal` + `listAccounts` chain. Wins **~50–100 ms** on signin warm path.
 6. ✅ **In-isolate L1 cache for KV session reads** — _shipped_. Per-isolate `Map<key, {value, expiresAt}>` with 30 s TTL, evicted on `set`/`delete`. Wraps `secondaryStorage.get` so same-isolate repeat reads skip KV entirely. **Measured win on `recommended` signin: `oc` 60→41 ms (-32%); other regions in noise on the warm path (the first signin already had KV warm).** The L1 cache shines on burst `get-session` calls — every page load sees the same session token referenced by N parallel API calls, and only one of them pays the KV GET.
 7. **Per-account rate limit + captcha after N failures** (security, not perf). Already wired at the IP layer via BA core; account-level rate limit is the natural next step before captcha.
+
+### Queued PRs (after CRDB lands)
+
+| PR  | scope                                                                | est. lines |           est. perf win |
+| --- | -------------------------------------------------------------------- | ---------: | ----------------------: |
+| #16 | UserDO pre-warm pool — PoolDirectoryDO + cron top-up + claim/release |       ~250 | 50–300 ms signup non-NA |
+| #17 | Pre-fire D1 INSERT during password hash                              |        ~80 |        50–150 ms signup |
+| #18 | DO-mapping admin UI (sortable region + colo columns)                 |       ~150 |    n/a (ops visibility) |
+| #19 | Bulk adapter join for `findOne(user, email, join.account)`           |       ~120 |   50–100 ms signin warm |
 
 ### Duplicate-account safety — every eventual-consistency path audited
 

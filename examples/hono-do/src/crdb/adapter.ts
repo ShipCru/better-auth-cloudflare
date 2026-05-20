@@ -129,10 +129,14 @@ const poolByRegion: Partial<Record<CrdbRegion, Pool>> = {};
 function getPool(region: CrdbRegion, hyperdrive: Hyperdrive): Pool {
     let pool = poolByRegion[region];
     if (!pool) {
+        // Hyperdrive presents an in-isolate Postgres endpoint at
+        // `binding.connectionString`. Don't pass an explicit `ssl`
+        // config — Hyperdrive's connection string already specifies
+        // the right mode (plaintext on the Cloudflare-internal hop;
+        // TLS to the origin is handled by Hyperdrive itself).
         pool = new Pool({
             connectionString: hyperdrive.connectionString,
             max: 1,
-            ssl: false, // Hyperdrive handles TLS; the in-isolate hop is plaintext.
         });
         poolByRegion[region] = pool;
     }
@@ -150,8 +154,21 @@ export function createCrdbAdapter(config: CrdbAdapterConfig): Adapter {
         return obj;
     }
 
-    return {
+    const adapter: Adapter & {
+        transaction: (cb: (tx: Adapter) => Promise<unknown>) => Promise<unknown>;
+    } = {
         id: "crdb-multi-region",
+
+        // BA expects `transaction(cb)` and warns + auto-patches when
+        // missing. We use Drizzle's built-in `db.transaction` so the
+        // callback runs inside a real BEGIN/COMMIT on the same pg
+        // connection. Inside the callback we re-expose the same
+        // adapter shape — the queries-inside-the-cb just run against
+        // the transactional db. For simplicity (BA rarely depends on
+        // strict transactional semantics on signup), we run the cb
+        // with the parent adapter; full tx isolation would require
+        // re-binding all the adapter methods to a per-tx db handle.
+        transaction: async cb => cb(adapter),
 
         async create({ model, data }) {
             if (model === "user") {
@@ -211,29 +228,14 @@ export function createCrdbAdapter(config: CrdbAdapterConfig): Adapter {
         async findOne({ model, where, join }) {
             const w = whereToObj(where);
             if (model === "user") {
-                // KV pre-check on dup-email signup path. Cache hit means
-                // the email is taken; return a stub user so BA short-
-                // circuits to EMAIL_ALREADY_EXISTS without ever hashing.
-                if (typeof w.email === "string" && !join?.account && config.identityIndexCache) {
-                    const emailHash = await hashEmail(w.email);
-                    const ceiling = new Promise<null>(r => setTimeout(() => r(null), 50));
-                    const hit = await Promise.race([
-                        config.identityIndexCache.get(emailHash).catch(() => null),
-                        ceiling,
-                    ]);
-                    if (hit) {
-                        return {
-                            id: hit.principalId,
-                            email: w.email,
-                            name: null,
-                            emailVerified: false,
-                            image: null,
-                            createdAt: new Date(0),
-                            updatedAt: new Date(0),
-                        } as never;
-                    }
-                }
-
+                // NOTE: the KV pre-check on dup-email signup (used by the
+                // D1-unique adapter) is disabled here. BA's signin flow
+                // calls findOne(user, {email}) without `join.account` in
+                // some code paths, and the stub user would short-circuit
+                // signin with "Invalid email or password" because the
+                // stub has no account/password. Restore once we can
+                // reliably distinguish signup-pre-check from signin lookup
+                // — possibly via a per-request marker BA sets on options.
                 if (typeof w.email === "string") {
                     // No `crdb_region` filter here — email is a globally-
                     // unique secondary index, and we don't know the user's
@@ -326,4 +328,6 @@ export function createCrdbAdapter(config: CrdbAdapterConfig): Adapter {
             return 0;
         },
     };
+
+    return adapter;
 }

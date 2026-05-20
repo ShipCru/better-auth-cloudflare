@@ -186,10 +186,11 @@ function createAuth(
         ],
         ...wrapped,
         // CRDB adapter overrides BA's `database` field when present. BA
-        // accepts an Adapter object directly; we cast because BA's
-        // public Adapter type is loosely typed (`any`-ish) and our
-        // typed adapter shape isn't reachable from the BA types.
-        ...(crdbAdapter ? { database: crdbAdapter as never } : {}),
+        // expects `database` to be a factory: `(opts) => Adapter`, not
+        // the Adapter object itself. We close over the already-built
+        // adapter and just return it (BA's init-time options are unused
+        // — our adapter is configured per-request via the closure).
+        ...(crdbAdapter ? { database: ((_opts: unknown) => crdbAdapter) as never } : {}),
         // In stateless mode replace BA's secondaryStorage with a no-op.
         // Without it, BA falls back to the database adapter for sessions
         // and our DO adapter throws on `create({model: 'session'})`. The

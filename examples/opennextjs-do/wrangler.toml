@@ -5,22 +5,83 @@ compatibility_flags = ["nodejs_compat"]
 
 assets = { directory = ".open-next/assets", binding = "ASSETS" }
 
-[[durable_objects.bindings]]
-name = "USER_DO"
-class_name = "UserDurableObject"
+[observability]
+enabled = true
 
-[[durable_objects.bindings]]
-name = "IDENTITY_DO"
-class_name = "IdentityDurableObject"
+# This Next.js app is the AUTH FRONTEND. It does not own DOs or KV or D1.
+# All auth-related requests are proxied to the Hono auth Worker, where
+# the DOs live, via the AUTH_BACKEND service binding below (see
+# src/middleware.ts). This avoids Cloudflare's same-account
+# *.workers.dev outbound-fetch quirk that makes plain HTTP rewrites
+# between Workers return the generic 404 placeholder.
+#
+# Local dev must also go through wrangler (`pnpm preview`) so the binding
+# is wired — plain `next dev` returns 503 from middleware because the
+# binding isn't present.
 
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+[[services]]
+binding = "AUTH_BACKEND"
+service = "better-auth-cloudflare-hono-do"
 
-[[kv_namespaces]]
-binding = "KV"
-id = "YOUR_KV_NAMESPACE_ID"
+# Sibling auth Worker that opts into the IdentityDO thick_cache fast path.
+# Deployed from the same source as AUTH_BACKEND via `wrangler deploy --env
+# thick`. The bench page exposes both as `current` and `thick-identity`
+# variants for live A/B.
+[[services]]
+binding = "AUTH_BACKEND_THICK_ID"
+service = "better-auth-cloudflare-hono-do-thick"
 
-[[analytics_engine_datasets]]
-binding = "AUTH_ANALYTICS"
-dataset = "ba_cf_do_events"
+# Sibling auth Worker with scrypt(N=4096) instead of BA's default
+# (N=16384). Deployed from the same source via `wrangler deploy --env
+# fast_hash`. Targets the ~200ms scrypt CPU slice of warm signin.
+[[services]]
+binding = "AUTH_BACKEND_FAST_HASH"
+service = "better-auth-cloudflare-hono-do-fast-hash"
+
+# Sibling auth Worker using native Web Crypto PBKDF2 (600k iters SHA-256).
+# `wrangler deploy --env pbkdf2`. A/B test of native crypto vs JS scrypt.
+[[services]]
+binding = "AUTH_BACKEND_PBKDF2"
+service = "better-auth-cloudflare-hono-do-pbkdf2"
+
+# Sibling auth Worker with KV (+ D1) cache in front of IdentityDO for
+# email→principal_id sign-in lookups. `wrangler deploy --env kv_cache`.
+[[services]]
+binding = "AUTH_BACKEND_KV_CACHE"
+service = "better-auth-cloudflare-hono-do-kv-cache"
+
+# Sibling auth Worker with USE_FAST_HASH=1 AND USE_KV_CACHE=1 stacked.
+# `wrangler deploy --env stacked`. Tests whether the two optimisations
+# compound — expected ~370ms warm signin p50 (-44% vs current).
+[[services]]
+binding = "AUTH_BACKEND_STACKED"
+service = "better-auth-cloudflare-hono-do-stacked"
+
+# Recommended production combo: pbkdf2 + pepper + kv-cache + bundle-rpc.
+# `wrangler deploy --env recommended`. Requires BETTER_AUTH_PEPPER secret.
+[[services]]
+binding = "AUTH_BACKEND_RECOMMENDED"
+service = "better-auth-cloudflare-hono-do-recommended"
+
+# Stateless variant: recommended + skip KV session write. Sub-300ms target.
+[[services]]
+binding = "AUTH_BACKEND_STATELESS"
+service = "better-auth-cloudflare-hono-do-stateless"
+
+# D1 UNIQUE variant: replaces IdentityDO.reserve+commit with a single D1
+# INSERT under a UNIQUE constraint. Tests signup-path latency parity vs DO.
+[[services]]
+binding = "AUTH_BACKEND_D1_UNIQUE"
+service = "better-auth-cloudflare-hono-do-d1-unique"
+
+# D1 UNIQUE + stateless: combo variant — drops KV session write for APAC.
+[[services]]
+binding = "AUTH_BACKEND_D1_UNIQUE_STATELESS"
+service = "better-auth-cloudflare-hono-do-d1-unique-stateless"
+
+# Probe Worker — owns the regional ProbeDurableObject instances.
+# `POST /probe` fans out to all CF regions via locationHint-pinned DOs.
+# Bench page calls this for the "Run from all regions" feature.
+[[services]]
+binding = "PROBE_WORKER"
+service = "better-auth-cloudflare-probe"

@@ -59,3 +59,419 @@ database_id = "00000000-0000-0000-0000-000000000000"
 # When set, the demo's "Continue with Google" button works end-to-end.
 # Callback URL to register in Google Console:
 #   https://your-worker-url/api/auth/callback/google
+
+# Sibling deploy: same source code, opts into the IdentityDO thick_cache
+# fast path. The bench page A/B's this against the default deploy.
+#
+#   wrangler deploy --env thick
+#
+# Bindings are independent — separate DO namespaces, KV, D1 — so the two
+# deploys never share state. That's the right call for clean A/B numbers.
+[env.thick]
+name = "better-auth-cloudflare-hono-do-thick"
+
+[env.thick.observability]
+enabled = true
+
+[env.thick.vars]
+USE_THICK_IDENTITY = "1"
+
+[[env.thick.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.thick.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.thick.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.thick.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.thick.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+# Skip D1 for the thick env to remove that variable from the bench
+# comparison. Add it back if you want recovery for the thick deploy too.
+
+# Sibling deploy: same source code, opts into the faster password hash
+# preset (scrypt N=4096 instead of N=16384). See src/auth/fast-hash.ts.
+#
+#   wrangler deploy --env fast_hash
+#
+# Independent DO/KV state from the default deploy. Users created here
+# can ONLY sign in here (hash format incompatible with default).
+[env.fast_hash]
+name = "better-auth-cloudflare-hono-do-fast-hash"
+
+[env.fast_hash.observability]
+enabled = true
+
+[env.fast_hash.vars]
+USE_FAST_HASH = "1"
+
+[[env.fast_hash.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.fast_hash.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.fast_hash.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.fast_hash.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.fast_hash.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+# Sibling deploy: native Web Crypto PBKDF2 (600k iters SHA-256) instead
+# of JS scrypt. Tests whether the Workers-native crypto path beats JS
+# at OWASP-recommended security level. See src/auth/pbkdf2-hash.ts.
+#
+#   wrangler deploy --env pbkdf2
+[env.pbkdf2]
+name = "better-auth-cloudflare-hono-do-pbkdf2"
+
+[env.pbkdf2.observability]
+enabled = true
+
+[env.pbkdf2.vars]
+USE_PBKDF2 = "1"
+
+[[env.pbkdf2.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.pbkdf2.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.pbkdf2.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.pbkdf2.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.pbkdf2.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+# Sibling deploy: KV cache (with optional D1 second tier) in front of
+# IdentityDO for email→principal_id lookups. Version-stamped for
+# freshness audit. See src/adapters/identity-cache.ts.
+#
+#   wrangler deploy --env kv_cache
+[env.kv_cache]
+name = "better-auth-cloudflare-hono-do-kv-cache"
+
+[env.kv_cache.observability]
+enabled = true
+
+[env.kv_cache.vars]
+USE_KV_CACHE = "1"
+
+[[env.kv_cache.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.kv_cache.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.kv_cache.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.kv_cache.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.kv_cache.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+# D1 second tier for the identity index. When bound, the cache writes
+# through to D1 too and reads fall to D1 on KV miss before going to
+# IdentityDO. Sessions API kicks in automatically for replica reads.
+# Apply IDENTITY_INDEX_D1_SCHEMA before first use.
+[[env.kv_cache.d1_databases]]
+binding = "AUTH_DB"
+database_name = "ba-cf-do-recovery"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+# Sibling deploy: stacked combo of fast-hash + kv-cache. Tests whether
+# the two optimisations compound. Expected: ~370ms warm signin p50
+# (-44% vs current). `wrangler deploy --env stacked`.
+[env.stacked]
+name = "better-auth-cloudflare-hono-do-stacked"
+
+[env.stacked.observability]
+enabled = true
+
+[env.stacked.vars]
+USE_FAST_HASH = "1"
+USE_KV_CACHE = "1"
+
+[[env.stacked.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.stacked.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.stacked.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.stacked.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.stacked.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+[[env.stacked.d1_databases]]
+binding = "AUTH_DB"
+database_name = "ba-cf-do-recovery"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+# RECOMMENDED PRODUCTION COMBO. Native PBKDF2 (Workers C++, no JS CPU
+# pressure) + pepper (HMAC server secret before hash, defense vs DB
+# leaks) + KV identity cache (skip IdentityDO on warm signin) + bundle
+# RPC (one DO call instead of two for the user+accounts join).
+#
+#   wrangler secret put BETTER_AUTH_SECRET --env recommended
+#   wrangler secret put BETTER_AUTH_PEPPER --env recommended    # hex or base64
+#   wrangler deploy --env recommended
+#
+# Bench-validated combo deployed for live A/B as the `recommended` variant.
+[env.recommended]
+name = "better-auth-cloudflare-hono-do-recommended"
+
+[env.recommended.observability]
+enabled = true
+
+[env.recommended.vars]
+USE_PBKDF2 = "1"
+USE_KV_CACHE = "1"
+USE_BUNDLE_RPC = "1"
+
+[[env.recommended.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.recommended.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.recommended.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.recommended.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.recommended.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+[[env.recommended.d1_databases]]
+binding = "AUTH_DB"
+database_name = "ba-cf-do-recovery"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+# Stateless variant: full recommended stack + USE_STATELESS_SESSION.
+# Drops BA's KV session write on signin (the signed session_data cookie
+# IS the session). Targets sub-300ms p50.
+#
+#   wrangler secret put BETTER_AUTH_SECRET --env stateless
+#   wrangler secret put BETTER_AUTH_PEPPER --env stateless
+#   wrangler deploy --env stateless
+[env.stateless]
+name = "better-auth-cloudflare-hono-do-stateless"
+
+[env.stateless.observability]
+enabled = true
+
+[env.stateless.vars]
+USE_PBKDF2 = "1"
+USE_KV_CACHE = "1"
+USE_BUNDLE_RPC = "1"
+USE_STATELESS_SESSION = "1"
+
+[[env.stateless.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.stateless.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.stateless.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.stateless.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.stateless.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+[[env.stateless.d1_databases]]
+binding = "AUTH_DB"
+database_name = "ba-cf-do-recovery"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+# D1-UNIQUE variant: replace IdentityDO with D1's UNIQUE constraint for
+# email uniqueness on signup. One D1 INSERT vs cold reserve+commit on a
+# brand-new IdentityDO (300-1500ms saved on new emails in non-NA).
+# Apply D1_IDENTITY_UNIQUE_SCHEMA before first use.
+#
+#   wrangler secret put BETTER_AUTH_SECRET --env d1_unique
+#   wrangler secret put BETTER_AUTH_PEPPER --env d1_unique
+#   wrangler deploy --env d1_unique
+[env.d1_unique]
+name = "better-auth-cloudflare-hono-do-d1-unique"
+
+[env.d1_unique.observability]
+enabled = true
+
+[env.d1_unique.vars]
+USE_PBKDF2 = "1"
+USE_D1_IDENTITY = "1"
+USE_BUNDLE_RPC = "1"
+
+[[env.d1_unique.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.d1_unique.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.d1_unique.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.d1_unique.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.d1_unique.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+[[env.d1_unique.d1_databases]]
+binding = "AUTH_DB"
+database_name = "ba-cf-do-recovery-enam"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+# d1-unique + stateless: combines D1 UNIQUE identity (fast EU/NA) with
+# the stateless session strategy (drops BA's secondaryStorage KV PUT).
+# Targets APAC, where the KV write back to a central region was the
+# dominant cost in bench (~500ms). Expected APAC p50 ~1900ms (down
+# from 2415 d1-unique only), keeps EU/NA sub-900ms.
+#
+#   wrangler secret put BETTER_AUTH_SECRET --env d1_unique_stateless
+#   wrangler secret put BETTER_AUTH_PEPPER --env d1_unique_stateless
+#   wrangler deploy --env d1_unique_stateless
+[env.d1_unique_stateless]
+name = "better-auth-cloudflare-hono-do-d1-unique-stateless"
+
+[env.d1_unique_stateless.observability]
+enabled = true
+
+[env.d1_unique_stateless.vars]
+USE_PBKDF2 = "1"
+USE_D1_IDENTITY = "1"
+USE_BUNDLE_RPC = "1"
+USE_STATELESS_SESSION = "1"
+
+[[env.d1_unique_stateless.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.d1_unique_stateless.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.d1_unique_stateless.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.d1_unique_stateless.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.d1_unique_stateless.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+[[env.d1_unique_stateless.d1_databases]]
+binding = "AUTH_DB"
+database_name = "ba-cf-do-recovery"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+# Same as d1_unique_stateless but with the D1 primary in APAC instead
+# of ENAM. Used purely to bench "what if the user is on the opposite
+# side of the world from the D1 primary?" — proves D1 read replicas +
+# Sessions API can cover global signin reads even with a far primary,
+# and quantifies the cross-region INSERT tax that signups pay.
+#
+#   wrangler secret put BETTER_AUTH_SECRET --env d1_unique_stateless_apac
+#   wrangler secret put BETTER_AUTH_PEPPER --env d1_unique_stateless_apac
+#   wrangler deploy --env d1_unique_stateless_apac
+[env.d1_unique_stateless_apac]
+name = "ba-cf-do-d1u-stateless-apac"
+
+[env.d1_unique_stateless_apac.observability]
+enabled = true
+
+[env.d1_unique_stateless_apac.vars]
+USE_PBKDF2 = "1"
+USE_D1_IDENTITY = "1"
+USE_BUNDLE_RPC = "1"
+USE_STATELESS_SESSION = "1"
+
+[[env.d1_unique_stateless_apac.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.d1_unique_stateless_apac.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.d1_unique_stateless_apac.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.d1_unique_stateless_apac.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.d1_unique_stateless_apac.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+[[env.d1_unique_stateless_apac.d1_databases]]
+binding = "AUTH_DB"
+database_name = "ba-cf-do-recovery-apac"
+database_id = "00000000-0000-0000-0000-000000000000"

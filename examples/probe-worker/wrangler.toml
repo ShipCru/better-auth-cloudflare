@@ -1,0 +1,67 @@
+name = "better-auth-cloudflare-probe"
+main = "src/index.ts"
+compatibility_date = "2026-05-19"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+# ProbeDurableObject — one instance per Cloudflare region, pinned at
+# creation via locationHint. The Worker fans out to all regions in
+# parallel; each DO calls one of the auth backends below from its own
+# colo, captures cf metadata, returns timings.
+[[durable_objects.bindings]]
+name = "PROBE_DO"
+class_name = "ProbeDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ProbeDurableObject"]
+
+# Service bindings to every auth variant. The probe DO picks one at
+# runtime via the variantId from the request. In-isolate dispatch from
+# the DO's colo so timings reflect real region→region latency to the
+# auth backend without HTTP/TLS noise.
+[[services]]
+binding = "AUTH_BACKEND"
+service = "better-auth-cloudflare-hono-do"
+
+[[services]]
+binding = "AUTH_BACKEND_THICK_ID"
+service = "better-auth-cloudflare-hono-do-thick"
+
+[[services]]
+binding = "AUTH_BACKEND_FAST_HASH"
+service = "better-auth-cloudflare-hono-do-fast-hash"
+
+[[services]]
+binding = "AUTH_BACKEND_PBKDF2"
+service = "better-auth-cloudflare-hono-do-pbkdf2"
+
+[[services]]
+binding = "AUTH_BACKEND_KV_CACHE"
+service = "better-auth-cloudflare-hono-do-kv-cache"
+
+[[services]]
+binding = "AUTH_BACKEND_STACKED"
+service = "better-auth-cloudflare-hono-do-stacked"
+
+[[services]]
+binding = "AUTH_BACKEND_RECOMMENDED"
+service = "better-auth-cloudflare-hono-do-recommended"
+
+[[services]]
+binding = "AUTH_BACKEND_STATELESS"
+service = "better-auth-cloudflare-hono-do-stateless"
+
+[[services]]
+binding = "AUTH_BACKEND_D1_UNIQUE"
+service = "better-auth-cloudflare-hono-do-d1-unique"
+
+[[services]]
+binding = "AUTH_BACKEND_D1_UNIQUE_STATELESS"
+service = "better-auth-cloudflare-hono-do-d1-unique-stateless"
+
+[[services]]
+binding = "AUTH_BACKEND_D1_UNIQUE_STATELESS_APAC"
+service = "ba-cf-do-d1u-stateless-apac"

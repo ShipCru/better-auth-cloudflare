@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { createAuth } from "./auth";
 import type { CloudflareBindings } from "./env";
+import { logRequest, getRequestId } from "better-auth-cloudflare";
 
 // REQUIRED: re-export the DO classes so Cloudflare can register them.
 // The `class_name` entries in wrangler.toml reference these symbols.
@@ -10,6 +11,42 @@ export { UserDurableObject, IdentityDurableObject } from "better-auth-cloudflare
 type Variables = { auth: ReturnType<typeof createAuth> };
 
 const app = new Hono<{ Bindings: CloudflareBindings; Variables: Variables }>();
+
+// Note on compression: Cloudflare's edge automatically compresses responses
+// based on the client's Accept-Encoding header (brotli > gzip). We do NOT
+// run server-side compression here — Hono's compress() would compress
+// unconditionally and break clients that don't advertise Accept-Encoding.
+
+// Per-request timing log. Emits a single info line per request with op
+// (= pathname), durationMs, status, colo, and country. Wrangler tail
+// + Cloudflare Workers Logs index by JSON keys, so dashboards can chart
+// p50/p95/p99 per op without changing this code.
+app.use("*", async (c, next) => {
+    const t0 = Date.now();
+    const cf = (c.req.raw as unknown as { cf?: Record<string, unknown> }).cf ?? {};
+    const requestId = getRequestId(c.req.raw);
+    await next();
+    logRequest({
+        requestId,
+        op: `${c.req.method} ${new URL(c.req.url).pathname}`,
+        durationMs: Date.now() - t0,
+        status: c.res.status,
+        colo: (cf.colo as string | undefined) ?? undefined,
+        country: (cf.country as string | undefined) ?? undefined,
+    });
+});
+
+// Cache headers per route family. Cloudflare honors these at the edge.
+//   /api/auth/*  → no-store (auth state must never be cached)
+//   /admin/*     → private, max-age=10 (~aligns with the recovery sync window)
+app.use("/api/auth/*", async (c, next) => {
+    await next();
+    c.res.headers.set("Cache-Control", "private, no-store, max-age=0");
+});
+app.use("/admin/*", async (c, next) => {
+    await next();
+    c.res.headers.set("Cache-Control", "private, max-age=10");
+});
 
 app.use(
     "/api/auth/**",
@@ -23,7 +60,16 @@ app.use(
 
 app.use("*", async (c, next) => {
     const cf = (c.req.raw as unknown as { cf?: unknown }).cf ?? {};
-    const auth = createAuth(c.env, cf as Parameters<typeof createAuth>[1], new URL(c.req.url).origin);
+    // Pass the Hono execution context's waitUntil so the DO adapter can
+    // defer non-critical writes (identity cache, thick cache) past the
+    // response. Saves ~50-200ms on signup p50.
+    const deferredWritesCtx = { waitUntil: (p: Promise<unknown>) => c.executionCtx.waitUntil(p) };
+    const auth = createAuth(
+        c.env,
+        cf as Parameters<typeof createAuth>[1],
+        new URL(c.req.url).origin,
+        deferredWritesCtx
+    );
     c.set("auth", auth);
     await next();
 });
@@ -43,6 +89,90 @@ app.get("/protected", async c => {
 });
 
 app.get("/health", c => c.json({ status: "ok" }));
+
+/**
+ * Public geo endpoint. No auth required — useful for landing pages,
+ * pre-signup forms (e.g., default the country dropdown, pick the right
+ * locale, decide which jurisdiction to route the user to before they
+ * even create an account).
+ *
+ * Returns the same `cf` block surfaced via the request to this Worker,
+ * including `colo` (the CF data-center airport code) and `region`
+ * (the in-country sub-region, e.g. "California"). All fields are
+ * nullable — Cloudflare may not populate every field for every
+ * request (private/Tor traffic, custom geolocation deals, etc.).
+ *
+ * Pair with the routing plan in the README: the response's
+ * `continent` is what the router uses to pick a jurisdiction at
+ * first-touch.
+ */
+app.get("/api/geo", c => {
+    const cf = (c.req.raw as unknown as { cf?: Record<string, unknown> }).cf ?? {};
+    const s = (k: string): string | null => {
+        const v = cf[k];
+        return typeof v === "string" ? v : null;
+    };
+    const n = (k: string): number | null => {
+        const v = cf[k];
+        return typeof v === "number" ? v : null;
+    };
+    return c.json(
+        {
+            colo: s("colo"),
+            country: s("country"),
+            continent: s("continent"),
+            region: s("region"),
+            regionCode: s("regionCode"),
+            city: s("city"),
+            postalCode: s("postalCode"),
+            timezone: s("timezone"),
+            latitude: s("latitude"),
+            longitude: s("longitude"),
+            asn: n("asn"),
+            asOrganization: s("asOrganization"),
+            // Hint useful for the multi-region router: what jurisdiction
+            // a fresh signup from this request would default to.
+            defaultJurisdiction: s("continent") === "EU" ? "eu" : "default",
+        },
+        { headers: { "cache-control": "private, max-age=30" } }
+    );
+});
+
+/**
+ * Debug-only metrics endpoint. Returns the analytics dataset binding
+ * status plus a sample SQL query for the Cloudflare Analytics Engine
+ * API. AE doesn't expose a runtime SQL API from inside Workers — queries
+ * must go through the account-level GraphQL/SQL API. Gate this behind
+ * admin auth + IP allowlist for production.
+ */
+app.get("/debug/metrics", async c => {
+    const ae = c.env.AUTH_ANALYTICS;
+    if (!ae) {
+        return c.json(
+            {
+                error: "AUTH_ANALYTICS not bound",
+                note: "Bind an Analytics Engine dataset in wrangler.toml to enable.",
+            },
+            503
+        );
+    }
+    return c.json({
+        bindingPresent: true,
+        sampleQuery: `
+            SELECT blob1 AS operation,
+                   quantileExact(0.50)(double1) AS p50_ms,
+                   quantileExact(0.95)(double1) AS p95_ms,
+                   quantileExact(0.99)(double1) AS p99_ms,
+                   count() AS n
+            FROM ba_cf_do_events
+            WHERE timestamp > NOW() - INTERVAL '1' HOUR
+              AND double2 = 1
+            GROUP BY blob1
+            ORDER BY n DESC
+        `.trim(),
+        runVia: "https://api.cloudflare.com/client/v4/accounts/{account_id}/analytics_engine/sql",
+    });
+});
 
 /**
  * Admin/dashboard read endpoint. Reads users straight from the D1 recovery

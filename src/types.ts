@@ -115,6 +115,13 @@ export interface DOConfig {
         continent?: string | null;
         region?: string | null;
     };
+    /**
+     * Opt-in: use the IdentityDO's thick_cache as the primary sign-in lookup
+     * path. Drops sign-in from three DO RPCs (IdentityDO.lookup →
+     * UserDO.findPrincipal → UserDO.listAccounts) to one. Trade: every
+     * write to user/account fans out to update the cache. See `DOAdapterConfig.thickIdentity`.
+     */
+    thickIdentity?: boolean;
 }
 
 /**

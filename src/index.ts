@@ -15,6 +15,18 @@ export * from "./types";
 export * from "./r2";
 export { createDoAdapter, type Adapter, type DOAdapterConfig, type WhereClause } from "./adapters/do";
 export { d1AuthDataStore, AUTH_DATA_D1_SCHEMA, type AuthDataStore } from "./adapters/auth-data";
+export {
+    createIdentityIndexCache,
+    IDENTITY_INDEX_D1_SCHEMA,
+    type IdentityIndexCache,
+    type IdentityIndexEntry,
+} from "./adapters/identity-cache";
+export {
+    createD1IdentityStore,
+    D1_IDENTITY_UNIQUE_SCHEMA,
+    type D1IdentityStore,
+    type D1IdentityResult,
+} from "./adapters/d1-identity";
 export { restorePrincipal } from "./adapters/restore";
 export {
     UserDurableObject,
@@ -28,9 +40,17 @@ export {
     type ReserveResult,
     type CommitResult,
 } from "./objects/IdentityDurableObject";
-export { createLogger, sha256Hex, shortHash, type Logger, type LogLevel } from "./logging";
+export { createLogger, timed, sha256Hex, shortHash, type Logger, type LogLevel } from "./logging";
 export { recordAdapterEvent, type AnalyticsRecorder } from "./telemetry/analytics";
 export { createOutboxFlush, type OutboxFlush, type OutboxEvent, type OutboxFlushConfig } from "./outbox";
+export { optionalBinding, requireBinding, resetOptionalBindingWarnings } from "./bindings";
+export {
+    getRequestId,
+    shortPrincipalHash,
+    logRequest,
+    withRequestLog,
+    type RequestLogFields,
+} from "./telemetry/request-log";
 
 /**
  * Cloudflare integration for Better Auth

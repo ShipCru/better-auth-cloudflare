@@ -65,3 +65,9 @@ service = "better-auth-cloudflare-hono-do-d1-unique-stateless"
 [[services]]
 binding = "AUTH_BACKEND_D1_UNIQUE_STATELESS_APAC"
 service = "ba-cf-do-d1u-stateless-apac"
+
+# CRDB multi-region variant (3 Hyperdrives + 3 CRDB Cloud clusters).
+# Deploy after the hono-do crdb_multi env is up.
+[[services]]
+binding = "AUTH_BACKEND_CRDB_MULTI"
+service = "ba-cf-do-crdb-multi"

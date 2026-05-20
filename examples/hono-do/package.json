@@ -7,16 +7,27 @@
         "deploy": "wrangler deploy --minify",
         "cf-typegen": "wrangler types --env-interface CloudflareBindings",
         "test:e2e": "vitest run",
-        "test:e2e:watch": "vitest"
+        "test:e2e:watch": "vitest",
+        "db:generate": "drizzle-kit generate --config=drizzle.config.ts",
+        "db:migrate": "tsx src/crdb/migrate.ts",
+        "db:push": "drizzle-kit push --config=drizzle.config.ts",
+        "db:studio": "drizzle-kit studio --config=drizzle.config.ts",
+        "db:check": "drizzle-kit check --config=drizzle.config.ts",
+        "db:gen:ba": "better-auth generate --config ./auth.gen.ts --output ./src/crdb/.ba-generated.ts --yes"
     },
     "dependencies": {
         "@cloudflare/workers-types": "^4.20260507.1",
         "@noble/hashes": "^1.8.0",
+        "@types/pg": "^8.20.0",
         "better-auth": "^1.6.11",
         "better-auth-cloudflare": "workspace:*",
-        "hono": "^4.12.19"
+        "drizzle-orm": "1.0.0-rc.3",
+        "hono": "^4.12.19",
+        "pg": "^8.21.0"
     },
     "devDependencies": {
+        "drizzle-kit": "^0.31.10",
+        "tsx": "^4.22.3",
         "typescript": "^5.7.0",
         "vitest": "^4.1.5",
         "wrangler": "^4.90.0"

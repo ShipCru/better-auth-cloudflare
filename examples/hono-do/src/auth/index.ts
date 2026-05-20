@@ -9,6 +9,7 @@ import {
 import { anonymous } from "better-auth/plugins";
 import type { CloudflareBindings } from "../env";
 import { pickPasswordConfig } from "./password-config";
+import { createCrdbAdapter } from "../crdb/adapter";
 
 /**
  * Single auth factory wired to the Durable Object adapter.
@@ -149,6 +150,29 @@ function createAuth(
     const stateless = env?.USE_STATELESS_SESSION === "1";
     const expiresIn = 21 * 24 * 60 * 60; // 21 days
 
+    // CRDB multi-region path: when USE_CRDB_MULTI=1 AND all three
+    // Hyperdrive bindings are present, route user + account writes to
+    // CockroachDB via the per-region Hyperdrive matching `cf.continent`.
+    // Falls back to the DO adapter from `wrapped` when any of the
+    // bindings is missing (so the variant can be deployed in stages).
+    const crdbAdapter =
+        env?.USE_CRDB_MULTI === "1" &&
+        env.HYPERDRIVE_AWS_US_EAST_2 &&
+        env.HYPERDRIVE_AWS_EU_CENTRAL_1 &&
+        env.HYPERDRIVE_AWS_AP_SOUTHEAST_1
+            ? createCrdbAdapter({
+                  hyperdrives: {
+                      "aws-us-east-2": env.HYPERDRIVE_AWS_US_EAST_2,
+                      "aws-eu-central-1": env.HYPERDRIVE_AWS_EU_CENTRAL_1,
+                      "aws-ap-southeast-1": env.HYPERDRIVE_AWS_AP_SOUTHEAST_1,
+                  },
+                  cf,
+                  identityIndexCache:
+                      env.USE_KV_CACHE === "1" && env.KV ? createIdentityIndexCache({ kv: env.KV }) : undefined,
+                  deferredWritesCtx,
+              })
+            : undefined;
+
     return betterAuth({
         baseURL,
         // Trust the local Hono port and the Next.js frontend that proxies
@@ -161,6 +185,12 @@ function createAuth(
             "https://better-auth-cloudflare-opennextjs-do.steve-4b7.workers.dev",
         ],
         ...wrapped,
+        // CRDB adapter overrides BA's `database` field when present. BA
+        // expects `database` to be a factory: `(opts) => Adapter`, not
+        // the Adapter object itself. We close over the already-built
+        // adapter and just return it (BA's init-time options are unused
+        // — our adapter is configured per-request via the closure).
+        ...(crdbAdapter ? { database: ((_opts: unknown) => crdbAdapter) as never } : {}),
         // In stateless mode replace BA's secondaryStorage with a no-op.
         // Without it, BA falls back to the database adapter for sessions
         // and our DO adapter throws on `create({model: 'session'})`. The

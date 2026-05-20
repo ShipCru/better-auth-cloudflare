@@ -480,3 +480,81 @@ dataset = "ba_cf_do_events"
 binding = "AUTH_DB"
 database_name = "ba-cf-do-recovery-apac"
 database_id = "00000000-0000-0000-0000-000000000000"
+
+# CockroachDB + Hyperdrive — single multi-region cluster (REGIONAL BY ROW).
+# Same pattern glass uses in production: one CRDB Cloud cluster with
+# both us-east-2 and eu-central-1 as configured regions. Each row's
+# `crdb_region` column places it on the right region's nodes. Hyperdrive
+# pools connections to the nearest SQL gateway.
+#
+# Setup checklist before deploying:
+#   1. CRDB Cloud: create ONE multi-region Serverless cluster.
+#      Add us-east-2 (primary) and eu-central-1 as regions in the
+#      cluster's Settings → Regions panel.
+#      Note the connection string (one URL, the SQL gateway resolves
+#      to the nearest region automatically).
+#   2. Apply schema once:
+#        psql "$URL" -f src/crdb/migrations/0000_init.sql
+#   3. Cloudflare: wrangler hyperdrive create ba-crdb \
+#        --connection-string="$URL"
+#   4. Paste the Hyperdrive id below.
+#   5. wrangler secret put BETTER_AUTH_SECRET --env crdb_multi
+#   6. wrangler secret put BETTER_AUTH_PEPPER --env crdb_multi
+#   7. wrangler deploy --env crdb_multi
+#
+# Bench via the existing probe-worker (AUTH_BACKEND_CRDB_MULTI binding).
+[env.crdb_multi]
+name = "ba-cf-do-crdb-multi"
+
+[env.crdb_multi.observability]
+enabled = true
+
+[env.crdb_multi.vars]
+USE_PBKDF2 = "1"
+USE_CRDB_MULTI = "1"
+USE_BUNDLE_RPC = "1"
+USE_STATELESS_SESSION = "1"
+USE_KV_CACHE = "1"
+
+# DO bindings: anonymous signin still uses UserDO (it's the cheapest
+# anonymous-user path). Email/password signups go to CRDB instead.
+[[env.crdb_multi.durable_objects.bindings]]
+name = "USER_DO"
+class_name = "UserDurableObject"
+
+[[env.crdb_multi.durable_objects.bindings]]
+name = "IDENTITY_DO"
+class_name = "IdentityDurableObject"
+
+[[env.crdb_multi.migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserDurableObject", "IdentityDurableObject"]
+
+[[env.crdb_multi.kv_namespaces]]
+binding = "KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.crdb_multi.analytics_engine_datasets]]
+binding = "AUTH_ANALYTICS"
+dataset = "ba_cf_do_events"
+
+# Three Hyperdrives pointing at the SAME multi-region CRDB Cloud cluster
+# but at different regional SQL gateway hostnames (aws-us-east-2,
+# aws-eu-central-1, aws-ap-southeast-1). Hyperdrive is itself regional
+# (caches connections at every CF edge), so using one Hyperdrive per
+# gateway lets each region's worker requests land on the closest gateway.
+# The row's `gateway_region()` default then places it in that region
+# (REGIONAL BY ROW). All three bindings → same cluster, same data.
+# Binding names match the AWS region exactly so adding a fourth region
+# later is a copy-paste, not a rename.
+[[env.crdb_multi.hyperdrive]]
+binding = "HYPERDRIVE_AWS_US_EAST_2"
+id = "YOUR_HYPERDRIVE_AWS_US_EAST_2_ID"
+
+[[env.crdb_multi.hyperdrive]]
+binding = "HYPERDRIVE_AWS_EU_CENTRAL_1"
+id = "YOUR_HYPERDRIVE_AWS_EU_CENTRAL_1_ID"
+
+[[env.crdb_multi.hyperdrive]]
+binding = "HYPERDRIVE_AWS_AP_SOUTHEAST_1"
+id = "YOUR_HYPERDRIVE_AWS_AP_SOUTHEAST_1_ID"

@@ -12,7 +12,8 @@
         "db:migrate": "tsx src/crdb/migrate.ts",
         "db:push": "drizzle-kit push --config=drizzle.config.ts",
         "db:studio": "drizzle-kit studio --config=drizzle.config.ts",
-        "db:check": "drizzle-kit check --config=drizzle.config.ts"
+        "db:check": "drizzle-kit check --config=drizzle.config.ts",
+        "db:gen:ba": "better-auth generate --config ./auth.gen.ts --output ./src/crdb/.ba-generated.ts --yes"
     },
     "dependencies": {
         "@cloudflare/workers-types": "^4.20260507.1",

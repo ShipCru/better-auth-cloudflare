@@ -85,7 +85,7 @@ async function main(): Promise<void> {
         console.log("regions:        " + regions.map(r => `${r.region}${r.primary ? " (primary)" : ""}`).join(", "));
         // SHOW LOCALITY isn't a top-level statement in CRDB — extract from
         // SHOW CREATE TABLE which always includes the LOCALITY clause.
-        for (const t of ["users", "accounts"]) {
+        for (const t of ['"user"', '"account"', '"session"']) {
             const { rows } = await client.query<{ create_statement: string }>(
                 `SELECT create_statement FROM [SHOW CREATE TABLE ${t}]`
             );

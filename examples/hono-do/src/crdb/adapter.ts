@@ -32,7 +32,7 @@ import { drizzle } from "drizzle-orm/cockroach";
 import { eq, and } from "drizzle-orm";
 import { Pool } from "pg";
 import type { IdentityIndexCache } from "better-auth-cloudflare";
-import { users, accounts } from "./schema";
+import { user as users, account as accounts } from "./schema";
 
 /**
  * Cluster region codes — matched against `cf.continent` to pick the
@@ -134,9 +134,15 @@ function getPool(region: CrdbRegion, hyperdrive: Hyperdrive): Pool {
         // config — Hyperdrive's connection string already specifies
         // the right mode (plaintext on the Cloudflare-internal hop;
         // TLS to the origin is handled by Hyperdrive itself).
+        // max=3: BA's signin path does findOne(user) then findOne(account)
+        // sequentially in the same handler; with max=1 the second await
+        // sometimes deadlocks waiting for the first connection to release.
+        // 3 gives headroom for 2 sequential queries + 1 in-flight without
+        // forcing concurrent opens for the common 1-query case.
         pool = new Pool({
             connectionString: hyperdrive.connectionString,
-            max: 1,
+            max: 3,
+            idleTimeoutMillis: 30_000,
         });
         poolByRegion[region] = pool;
     }
@@ -177,6 +183,10 @@ export function createCrdbAdapter(config: CrdbAdapterConfig): Adapter {
                 const [row] = await db
                     .insert(users)
                     .values({
+                        // BA generates ids (text, not uuid). Forward
+                        // whatever it sent — falls back to a uuid v4 if
+                        // BA didn't (older versions / certain plugins).
+                        id: (data.id as string) ?? crypto.randomUUID(),
                         // Don't set crdbRegion explicitly — let the SQL
                         // default (default_to_database_primary_region(gateway_region()))
                         // pick the SQL gateway's region. Hyperdrive routes
@@ -186,6 +196,7 @@ export function createCrdbAdapter(config: CrdbAdapterConfig): Adapter {
                         email,
                         emailVerified: (data.emailVerified as boolean) ?? false,
                         image: (data.image as string) ?? null,
+                        isAnonymous: (data.isAnonymous as boolean) ?? false,
                     })
                     .returning();
                 // Write-through to KV identity_index. Deferred so the
@@ -209,6 +220,7 @@ export function createCrdbAdapter(config: CrdbAdapterConfig): Adapter {
                 const [row] = await db
                     .insert(accounts)
                     .values({
+                        id: (data.id as string) ?? crypto.randomUUID(),
                         crdbRegion: accountRegion,
                         userId: data.userId as string,
                         providerId: data.providerId as string,
